@@ -386,7 +386,9 @@ export function Game({ username, displayName, onLogout }: Props) {
     } else if (s.mode === "menu") {
       handleMenuInput(key);
     } else if (s.mode === "battle") {
-      handleBattleInput(key);
+      // During battle, route to menu handler when a menu is open, otherwise battle handler
+      if (s.menu) handleMenuInput(key);
+      else handleBattleInput(key);
     }
   }
 
