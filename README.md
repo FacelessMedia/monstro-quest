@@ -4,8 +4,10 @@ A fully playable, original retro monster-catching RPG **built from scratch in 60
 
 > **Everything is original.** All sprites are drawn programmatically as colored pixel grids in code (`lib/sprites.ts`). All creature names, designs, lore, types, and moves are original. No copyrighted or trademarked content was used.
 
-## Live Site
-After deploying: https://monstro-quest.vercel.app
+## 🎮 Play it now
+**https://monstro-quest.vercel.app**
+
+Click "Play as Guest" to start instantly, or sign up to keep a synced username-based save.
 
 ## Features
 
