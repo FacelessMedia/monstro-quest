@@ -17,6 +17,7 @@ import {
   gainExp,
   tryCatch,
   expYield,
+  effectiveness,
   TYPE_COLORS,
 } from "../lib/creatures";
 import {
@@ -278,6 +279,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     ctx.imageSmoothingEnabled = false;
 
     let lastT = performance.now();
+    let lastHintKey = "";
 
     function loop(t: number) {
       const dt = Math.min(0.05, (t - lastT) / 1000);
@@ -286,6 +288,13 @@ export function Game({ username, displayName, onLogout }: Props) {
       if (s && ctx) {
         update(s, dt);
         render(ctx, s);
+        // Throttle hint updates: only re-render React when context changes
+        const key = `${s.mode}|${s.menu?.kind ?? ""}|${s.battle?.phase ?? ""}`;
+        if (key !== lastHintKey) {
+          lastHintKey = key;
+          const newHint = currentHint(s);
+          setHint((prev) => (prev === newHint ? prev : newHint));
+        }
       }
       rafRef.current = requestAnimationFrame(loop);
     }
@@ -966,6 +975,22 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (s.battle.activeIdx < 0) s.battle.activeIdx = 0;
   }
 
+  // Compute a contextual help string for the bottom-of-screen hint
+  function currentHint(s: GameRef): string {
+    if (s.mode === "dialogue") return "SPACE/ENTER · Continue · (hold to fast-forward)";
+    if (s.mode === "battle") {
+      if (!s.menu) return "SPACE/ENTER · Continue · (hold to fast-forward)";
+      if (s.menu.kind === "battleMain") return "Arrows · Navigate · SPACE · Confirm";
+      if (s.menu.kind === "battleFight") return "Arrows · Pick move · SPACE · Use · ESC · Back";
+      if (s.menu.kind === "battleBag") return "Arrows · Navigate · SPACE · Use · ESC · Back";
+    }
+    if (s.mode === "menu") {
+      if (s.menu?.kind === "starter") return "Arrows · Browse · SPACE · Choose";
+      return "Arrows · Navigate · SPACE · Select · ESC · Close";
+    }
+    return "Arrows/WASD · Move · SPACE · Talk · ESC · Menu · SHIFT · Run";
+  }
+
   // ========== UPDATE ==========
   function update(s: GameRef, dt: number) {
     s.frame += 1;
@@ -1033,18 +1058,22 @@ export function Game({ username, displayName, onLogout }: Props) {
         }
       }
     } else if (s.mode === "dialogue" && s.dialogue) {
-      // Animate text typing
+      // Animate text typing — hold confirm to fast-forward
       const fullLen = s.dialogue.lines[s.dialogue.index].length;
-      s.dialogue.charsShown = Math.min(fullLen, s.dialogue.charsShown + dt * 60);
+      const fast = s.pressed.has("confirm") || s.pressed.has("cancel");
+      const speed = fast ? 240 : 60;
+      s.dialogue.charsShown = Math.min(fullLen, s.dialogue.charsShown + dt * speed);
     } else if (s.mode === "battle" && s.battle) {
       const b = s.battle;
       // Fade in
       if (b.fadeIn > 0) {
         b.fadeIn = Math.max(0, b.fadeIn - dt * 1.2);
       }
-      // Animate message text
+      // Animate message text — hold confirm to fast-forward
       if (b.messageProgress < b.message.length) {
-        b.messageProgress = Math.min(b.message.length, b.messageProgress + dt * 50);
+        const fast = s.pressed.has("confirm") || s.pressed.has("cancel");
+        const speed = fast ? 200 : 50;
+        b.messageProgress = Math.min(b.message.length, b.messageProgress + dt * speed);
       }
       // Shake
       if (b.playerShake > 0) b.playerShake = Math.max(0, b.playerShake - dt * 2);
@@ -1479,19 +1508,40 @@ export function Game({ username, displayName, onLogout }: Props) {
           ctx.fillRect(x - 6, y - 14, 200, 26);
           drawText(ctx, ">", x - 6, y + 2, "#ffe066", 14, "left");
         }
-        drawText(ctx, m.options[i], x + 16, y + 2, "#fff", 14, "left");
+        // PP color: red when 0, yellow at <=25%, white otherwise
+        const slot = c.moves[i];
+        let nameColor = "#fff";
+        if (slot) {
+          if (slot.pp <= 0) nameColor = "#ff6b6b";
+          else if (slot.pp <= Math.ceil(slot.maxPp / 4)) nameColor = "#ffd040";
+        }
+        drawText(ctx, m.options[i], x + 16, y + 2, nameColor, 14, "left");
       }
-      // PP / type indicator on right
+      // Move detail card on right
       const sel = c.moves[m.selected];
       if (sel) {
         const mv = MOVES[sel.moveId];
+        // Type pill
         ctx.fillStyle = TYPE_COLORS[mv.type];
         ctx.fillRect(CANVAS_W - 100, boxY - 28, 92, 24);
         ctx.strokeStyle = "#1a1326";
         ctx.lineWidth = 2;
         ctx.strokeRect(CANVAS_W - 100, boxY - 28, 92, 24);
         drawText(ctx, mv.type.toUpperCase(), CANVAS_W - 54, boxY - 12, "#1a1326", 11, "center");
-        drawText(ctx, `PP ${sel.pp}/${sel.maxPp}`, CANVAS_W - 8, boxY - 38, "#fff", 12, "right");
+        // PP / power / accuracy line above the menu box
+        const pwr = mv.power > 0 ? `PWR ${mv.power}` : "STATUS";
+        drawText(ctx, `${pwr}  ACC ${mv.accuracy}%  PP ${sel.pp}/${sel.maxPp}`, CANVAS_W - 8, boxY - 38, "#fff", 11, "right");
+        // Type-effectiveness preview vs current enemy
+        if (s.battle.enemy && mv.power > 0) {
+          const def = SPECIES[s.battle.enemy.speciesId];
+          const eff = effectiveness(mv.type, def.types);
+          let effText = "";
+          let effColor = "#b8b8d4";
+          if (eff === 0) { effText = "NO EFFECT"; effColor = "#888"; }
+          else if (eff >= 2) { effText = "SUPER EFFECTIVE x" + eff; effColor = "#5fae5f"; }
+          else if (eff > 0 && eff < 1) { effText = "RESISTED x" + eff; effColor = "#ff6b6b"; }
+          if (effText) drawText(ctx, effText, CANVAS_W - 8, boxY - 54, effColor, 10, "right");
+        }
       }
     } else if (m.kind === "battleBag") {
       for (let i = 0; i < m.options.length; i++) {
@@ -1503,6 +1553,18 @@ export function Game({ username, displayName, onLogout }: Props) {
           drawText(ctx, ">", x - 6, y + 2, "#ffe066", 14, "left");
         }
         drawText(ctx, m.options[i], x + 16, y + 2, "#fff", 13, "left");
+      }
+      // Catch chance hint when capsule highlighted
+      if (m.selected === 0 && s.battle.enemy) {
+        const e = s.battle.enemy;
+        const sp = SPECIES[e.speciesId];
+        const hpFactor = (3 * e.maxHp - 2 * e.currentHp) / (3 * e.maxHp);
+        const chance = Math.max(0.01, Math.min(0.99, (hpFactor * sp.catchRate) / 255));
+        const pct = Math.round(chance * 100);
+        let color = "#ff6b6b";
+        if (pct >= 60) color = "#5fae5f";
+        else if (pct >= 30) color = "#ffd040";
+        drawText(ctx, `~${pct}% catch chance (lower HP = easier!)`, CANVAS_W - 24, boxY - 12, color, 11, "right");
       }
     }
   }
@@ -1548,16 +1610,23 @@ export function Game({ username, displayName, onLogout }: Props) {
     return lines;
   }
 
+  function handleLogout() {
+    const ok = window.confirm("Save and log out? Your progress is autosaved.");
+    if (!ok) return;
+    doSave(false);
+    onLogout();
+  }
+
   return (
     <div className="game-wrapper">
       <div className="game-toolbar">
         <span className="toolbar-btn" style={{ cursor: "default" }}>
           {displayName}{isGuest(username) ? " (Guest)" : ""}
         </span>
-        <button className="toolbar-btn" onClick={() => doSave(true)}>
+        <button className="toolbar-btn" onClick={() => doSave(true)} title="Save game (or press ESC > SAVE)">
           {savedFlash ? "✓ Saved" : "Save"}
         </button>
-        <button className="toolbar-btn" onClick={onLogout}>Logout</button>
+        <button className="toolbar-btn" onClick={handleLogout} title="Save and return to title">Logout</button>
       </div>
       <canvas
         ref={canvasRef}

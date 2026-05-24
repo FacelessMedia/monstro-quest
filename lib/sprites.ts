@@ -3,16 +3,20 @@
 
 export type Sprite = { rows: string[]; palette: Record<string, string> };
 
-export function drawSprite(
-  ctx: CanvasRenderingContext2D,
-  sprite: Sprite,
-  x: number,
-  y: number,
-  pixelSize: number = 1,
-  flipX: boolean = false
-) {
+// Cache rendered sprite canvases keyed by sprite reference + scale + flipped flag
+// This avoids the thousands of fillRect calls per frame that were the main perf hit.
+const spriteCache = new WeakMap<Sprite, Map<string, HTMLCanvasElement>>();
+
+function renderSpriteToCanvas(sprite: Sprite, pixelSize: number, flipX: boolean): HTMLCanvasElement {
   const { rows, palette } = sprite;
   const h = rows.length;
+  const w = rows[0]?.length ?? 0;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, w * pixelSize);
+  canvas.height = Math.max(1, h * pixelSize);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+  ctx.imageSmoothingEnabled = false;
   for (let row = 0; row < h; row++) {
     const line = rows[row];
     for (let col = 0; col < line.length; col++) {
@@ -21,10 +25,48 @@ export function drawSprite(
       const color = palette[ch];
       if (!color) continue;
       ctx.fillStyle = color;
-      const dx = flipX ? x + (line.length - 1 - col) * pixelSize : x + col * pixelSize;
-      const dy = y + row * pixelSize;
+      const dx = flipX ? (line.length - 1 - col) * pixelSize : col * pixelSize;
+      const dy = row * pixelSize;
       ctx.fillRect(dx, dy, pixelSize, pixelSize);
     }
+  }
+  return canvas;
+}
+
+function getCachedSprite(sprite: Sprite, pixelSize: number, flipX: boolean): HTMLCanvasElement {
+  let scaleMap = spriteCache.get(sprite);
+  if (!scaleMap) {
+    scaleMap = new Map();
+    spriteCache.set(sprite, scaleMap);
+  }
+  const key = `${pixelSize}|${flipX ? "1" : "0"}`;
+  let canvas = scaleMap.get(key);
+  if (!canvas) {
+    canvas = renderSpriteToCanvas(sprite, pixelSize, flipX);
+    scaleMap.set(key, canvas);
+  }
+  return canvas;
+}
+
+export function drawSprite(
+  ctx: CanvasRenderingContext2D,
+  sprite: Sprite,
+  x: number,
+  y: number,
+  pixelSize: number = 1,
+  flipX: boolean = false
+) {
+  // SSR / non-browser guard
+  if (typeof document === "undefined") return;
+  const cached = getCachedSprite(sprite, pixelSize, flipX);
+  ctx.drawImage(cached, Math.round(x), Math.round(y));
+}
+
+// Optional: warm-up call clients can use to pre-render frequently-drawn sprites.
+export function precacheSprites(sprites: Array<{ sprite: Sprite; pixelSize: number; flipX?: boolean }>) {
+  if (typeof document === "undefined") return;
+  for (const s of sprites) {
+    getCachedSprite(s.sprite, s.pixelSize, s.flipX ?? false);
   }
 }
 
