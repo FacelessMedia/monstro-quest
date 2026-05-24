@@ -447,7 +447,7 @@ export function Game({ username, displayName, onLogout }: Props) {
   function openPauseMenu() {
     const s = stateRef.current;
     if (!s) return;
-    const opts = ["PARTY", "BAG", "SAVE", "QUIT"];
+    const opts = ["PARTY", "MONSTRODEX", "BAG", "SAVE", "QUIT"];
     startMenu({ kind: "pause", options: opts, selected: 0 });
   }
 
@@ -538,6 +538,17 @@ export function Game({ username, displayName, onLogout }: Props) {
           `Catch Capsules: ${s.save.bag.capsules}`,
           `Potions: ${s.save.bag.potions}`,
           `Coins: ${s.save.money}`,
+        ]);
+        closeMenu();
+      } else if (choice === "MONSTRODEX") {
+        const total = Object.keys(SPECIES).length;
+        const seen = s.save.monstroSeen.length;
+        const caught = s.save.monstroCaught.length;
+        const caughtList = s.save.monstroCaught.map((id) => `· ${SPECIES[id].name} (${SPECIES[id].types.join("/")})`);
+        startDialogue([
+          `MONSTRODEX — Verdant Region`,
+          `Seen: ${seen}/${total}  ·  Caught: ${caught}/${total}`,
+          ...(caughtList.length ? caughtList : ["No Monstro caught yet. Throw a Catch Capsule!"]),
         ]);
         closeMenu();
       } else if (choice === "QUIT") {
