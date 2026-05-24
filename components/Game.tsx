@@ -530,29 +530,31 @@ export function Game({ username, displayName, onLogout }: Props) {
         closeMenu();
       } else if (choice === "PARTY") {
         if (s.save.party.length === 0) {
+          s.menu = undefined;
           startDialogue(["You have no Monstro yet."]);
-          closeMenu();
         } else {
           startMenu({ kind: "party", options: s.save.party.map((c) => `${SPECIES[c.speciesId].name} Lv${c.level}`), selected: 0 });
         }
       } else if (choice === "BAG") {
+        // Close menu first so dialogue mode sticks
+        s.menu = undefined;
         startDialogue([
           `Catch Capsules: ${s.save.bag.capsules}`,
           `Potions: ${s.save.bag.potions}`,
           `Coins: ${s.save.money}`,
         ]);
-        closeMenu();
       } else if (choice === "MONSTRODEX") {
         const total = Object.keys(SPECIES).length;
         const seen = s.save.monstroSeen.length;
         const caught = s.save.monstroCaught.length;
         const caughtList = s.save.monstroCaught.map((id) => `· ${SPECIES[id].name} (${SPECIES[id].types.join("/")})`);
+        // Close menu first so dialogue mode sticks
+        s.menu = undefined;
         startDialogue([
           `MONSTRODEX — Verdant Region`,
           `Seen: ${seen}/${total}  ·  Caught: ${caught}/${total}`,
           ...(caughtList.length ? caughtList : ["No Monstro caught yet. Throw a Catch Capsule!"]),
         ]);
-        closeMenu();
       } else if (choice === "QUIT") {
         doSave(false);
         onLogout();
@@ -567,8 +569,8 @@ export function Game({ username, displayName, onLogout }: Props) {
         `ATK ${c.atk}  DEF ${c.def}  SPD ${c.spd}`,
         `Moves: ${c.moves.map((mv) => MOVES[mv.moveId].name).join(", ")}`,
       ];
+      s.menu = undefined;
       startDialogue(lines);
-      closeMenu();
     } else if (m.kind === "battleMain") {
       const choice = m.options[m.selected];
       if (choice === "FIGHT") openFightMenu();
