@@ -89,6 +89,8 @@ type BattlePhase =
   | "enemyAttack"
   | "throwBall"
   | "checkCatch"
+  | "brokeFree" // capsule broke, enemy will attack next
+  | "switchIn" // showing "X fainted! Go Y!" before menu reopens
   | "victory"
   | "defeat"
   | "fled"
@@ -652,7 +654,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
-    if (b.phase === "intro" || b.phase === "playerAttack" || b.phase === "enemyAttack" || b.phase === "throwBall" || b.phase === "checkCatch") {
+    if (b.phase === "intro" || b.phase === "playerAttack" || b.phase === "enemyAttack" || b.phase === "throwBall" || b.phase === "checkCatch" || b.phase === "brokeFree" || b.phase === "switchIn") {
       // Allow skipping text
       if ((key === "confirm" || key === "cancel") && b.messageProgress < b.message.length) {
         b.messageProgress = b.message.length;
@@ -689,6 +691,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (!s || !s.battle) return;
     s.battle.message = text;
     s.battle.messageProgress = 0;
+    s.battle.messageQueue = [];
     if (action) action();
     if (nextPhase) s.battle.phase = nextPhase;
   }
@@ -733,11 +736,20 @@ export function Game({ username, displayName, onLogout }: Props) {
       if (b.ballOutcome === "caught") {
         catchSucceed();
       } else {
-        // It broke out, enemy turn next
-        battleMessage("Oh no! It broke free!", "enemyAttack");
+        // It broke out — move to brokeFree phase, enemy attacks on next advance
         s.menu = undefined;
-        setTimeout(() => doEnemyAttack(), 800);
+        b.phase = "brokeFree";
+        b.message = "Oh no! It broke free!";
+        b.messageProgress = 0;
+        b.messageQueue = [];
       }
+    } else if (b.phase === "brokeFree") {
+      // User dismissed the "broke free" message → enemy now attacks
+      doEnemyAttack();
+    } else if (b.phase === "switchIn") {
+      // After fainted-switch message, open main menu
+      b.phase = "menu";
+      s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
     }
   }
 
@@ -826,23 +838,29 @@ export function Game({ username, displayName, onLogout }: Props) {
     // Find next non-fainted
     const nextIdx = s.save.party.findIndex((p, i) => i !== b.activeIdx && p.currentHp > 0);
     if (nextIdx >= 0) {
+      const oldName = SPECIES[c.speciesId].name;
       b.activeIdx = nextIdx;
-      battleMessage(`${SPECIES[c.speciesId].name} fainted! Go, ${SPECIES[s.save.party[nextIdx].speciesId].name}!`, "menu");
-      setTimeout(() => {
-        if (s.battle) {
-          s.battle.phase = "menu";
-          s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
-        }
-      }, 1000);
+      const newName = SPECIES[s.save.party[nextIdx].speciesId].name;
+      // Queue: faint message → switchIn message → menu (via switchIn phase advance)
+      b.phase = "switchIn";
+      b.message = `${oldName} fainted! Go, ${newName}!`;
+      b.messageProgress = 0;
+      b.messageQueue = [];
     } else {
       // All fainted - blackout
       queueBattleMessages([
         { text: `${SPECIES[c.speciesId].name} fainted!`, next: "defeat" },
         { text: `${displayName} blacked out...`, action: () => {} },
         { text: `You rush back to Hearthwick Town.`, action: () => {
-          // Heal party and teleport
+          // Heal party and teleport (apply to both save and live player)
           s.save.party.forEach((p) => { p.currentHp = Math.max(1, Math.floor(p.maxHp / 2)); });
           s.save.position = { mapId: "hearthwick", x: 9, y: 8, facing: "down" };
+          s.player.x = 9;
+          s.player.y = 8;
+          s.player.facing = "down";
+          s.player.isMoving = false;
+          s.player.moveProgress = 0;
+          centerCamera(s);
         } },
       ]);
     }
@@ -1402,6 +1420,20 @@ export function Game({ username, displayName, onLogout }: Props) {
     for (const ln of lines) {
       drawText(ctx, ln, 20, ty, "#fff", 13, "left");
       ty += 18;
+    }
+    // Continue indicator when text is fully shown
+    if (b.messageProgress >= b.message.length) {
+      const blink = Math.floor(Date.now() / 400) % 2 === 0;
+      if (blink) {
+        ctx.fillStyle = "#ffe066";
+        ctx.beginPath();
+        ctx.moveTo(CANVAS_W - 28, boxY + 64);
+        ctx.lineTo(CANVAS_W - 18, boxY + 64);
+        ctx.lineTo(CANVAS_W - 23, boxY + 72);
+        ctx.closePath();
+        ctx.fill();
+      }
+      drawText(ctx, "[SPACE] next", CANVAS_W - 110, boxY + 70, "#b8b8d4", 10, "left");
     }
   }
 
