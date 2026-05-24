@@ -879,8 +879,11 @@ export function Game({ username, displayName, onLogout }: Props) {
       queueBattleMessages([{ text: "Got away safely!", next: "fled" }]);
     } else {
       s.menu = undefined;
-      battleMessage("Couldn't escape!", "enemyAttack");
-      setTimeout(() => doEnemyAttack(), 800);
+      // Use brokeFree-style phase: user dismisses message, then enemy attacks
+      b.phase = "brokeFree";
+      b.message = "Couldn't escape!";
+      b.messageProgress = 0;
+      b.messageQueue = [];
     }
   }
 
