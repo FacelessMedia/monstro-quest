@@ -15,11 +15,13 @@ import type { ItemId } from "./items";
 //  H = healing pad (walkable, full heal trigger)
 //  F = catcher ball pickup (walkable, gives item)
 
-export type TileType = "G" | "T" | "X" | "W" | "P" | "S" | "B" | "D" | "N" | "I" | "H" | "F" | "C";
+export type TileType = "G" | "T" | "X" | "W" | "P" | "S" | "B" | "D" | "N" | "I" | "H" | "F" | "C" | "L" | "Z";
 
 // Note: F (field item) is walkable until picked up; the pickup logic handles consumption.
 // C (cuttable tree) is blocked until the player uses a Cut Stone on it.
-export const BLOCKED_TILES: Set<TileType> = new Set(["X", "W", "B", "N", "I", "C"]);
+// L (lava) is blocked but renders as animated lava.
+// Z (snow) is walkable and renders as a snowy ground tile.
+export const BLOCKED_TILES: Set<TileType> = new Set(["X", "W", "B", "N", "I", "C", "L"]);
 
 export type Encounter = { speciesId: string; minLevel: number; maxLevel: number; weight: number };
 
@@ -29,6 +31,10 @@ export type MapPortal = {
   toMap: string;
   toX: number;
   toY: number;
+  /** Optional save-flag gate — if set and the flag is missing, the portal won't fire. */
+  requiresFlag?: string;
+  /** Dialogue lines shown when the player tries to use a flag-gated portal without the flag. */
+  blockedMsg?: string[];
 };
 
 export type TrainerDef = {
@@ -455,9 +461,9 @@ const sunshore: GameMap = {
     "XBGTTGGGGGGGGGGTTGBX",
     "XBGTTGGGGGGGGGGTTGBX",
     "XBGGGGGGGGGGGGGGGGBX",
-    "XBGGGGGGGGGNGGGGGGBX",
-    "XBBBBBBBBBBBBBBBBBBX",
-    "XXXXXXXXXXXXXXXXXXXX",
+    "XBGGGGGGGNGGGGGGGGBX",
+    "XBBBBBBBSSBBBBBBBBBX",
+    "XXXXXXXXSSXXXXXXXXXX",
   ],
   encounters: [
     { speciesId: "stonepup", minLevel: 7, maxLevel: 11, weight: 35 },
@@ -470,6 +476,11 @@ const sunshore: GameMap = {
   portals: [
     { x: 8, y: 0, toMap: "lumencove", toX: 8, toY: 13 },
     { x: 9, y: 0, toMap: "lumencove", toX: 9, toY: 13 },
+    // South exit to Emberfall — only open after Brak is defeated.
+    { x: 8, y: 14, toMap: "emberfall", toX: 8, toY: 1, requiresFlag: "gymBrakDefeated",
+      blockedMsg: ["A faint stone seal hums.", "It will fade once the Cave Warden is bested."] },
+    { x: 9, y: 14, toMap: "emberfall", toX: 9, toY: 1, requiresFlag: "gymBrakDefeated",
+      blockedMsg: ["A faint stone seal hums.", "It will fade once the Cave Warden is bested."] },
   ],
   dark: true,
   npcs: [
@@ -494,9 +505,9 @@ const sunshore: GameMap = {
         ],
       },
     },
-    // === Gym Leader: Cave Warden Brak — boss, smart AI, awards Stone Badge ===
+    // === Gym Leader: Cave Warden Brak — blocks the south corridor; defeat to pass ===
     {
-      x: 10,
+      x: 9,
       y: 12,
       spriteKey: "gymleader",
       dialogue: ["So... a new challenger reaches my cavern."],
@@ -538,12 +549,237 @@ const sunshore: GameMap = {
   ],
 };
 
+// ============ EMBERFALL VOLCANO (south of Sunshore — Flame Badge gym) ============
+const emberfall: GameMap = {
+  id: "emberfall",
+  name: "Emberfall Volcano",
+  tiles: [
+    "XXXXXXXXSSXXXXXXXXXX",
+    "XBBBBBBBSSBBBBBBBBBX",
+    "XBGGGGGGSSGGGGGGGGBX",
+    "XBGGGGGGGGGGGGGGGGBX",
+    "XBGLLGGGGGGGGGGLLGBX",
+    "XBGLLGGGGGGGGGGLLGBX",
+    "XBGGGGGGTTGGGGGGGGBX",
+    "XBXXXXXXTTXXXXFXXXBX",
+    "XBGGGGGGGGGGNGGGGGBX",
+    "XBGTTGGGLLGGGGGTTGBX",
+    "XBGTTGGGLLGGGGGTTGBX",
+    "XBGGGGGGGGGGGGGGGGBX",
+    "XBGGGGGGGNGGGGGGGGBX",
+    "XBBBBBBBSSBBBBBBBBBX",
+    "XXXXXXXXSSXXXXXXXXXX",
+  ],
+  encounters: [
+    { speciesId: "flarefox", minLevel: 14, maxLevel: 18, weight: 30 },
+    { speciesId: "pebbat", minLevel: 14, maxLevel: 18, weight: 25 },
+    { speciesId: "magmite", minLevel: 16, maxLevel: 20, weight: 20 },
+    { speciesId: "cinderpaw", minLevel: 15, maxLevel: 18, weight: 10 },
+    { speciesId: "rockle", minLevel: 15, maxLevel: 19, weight: 10 },
+    { speciesId: "magmaroth", minLevel: 22, maxLevel: 24, weight: 5 },
+  ],
+  portals: [
+    { x: 8, y: 0, toMap: "sunshore", toX: 8, toY: 13 },
+    { x: 9, y: 0, toMap: "sunshore", toX: 9, toY: 13 },
+    // South exit to Frostpeak — only opens after Magma is defeated.
+    { x: 8, y: 14, toMap: "frostpeak", toX: 8, toY: 1, requiresFlag: "gymMagmaDefeated",
+      blockedMsg: ["A wall of intense heat rolls south.", "Defeat the Volcano Sage to safely pass."] },
+    { x: 9, y: 14, toMap: "frostpeak", toX: 9, toY: 1, requiresFlag: "gymMagmaDefeated",
+      blockedMsg: ["A wall of intense heat rolls south.", "Defeat the Volcano Sage to safely pass."] },
+  ],
+  dark: true,
+  npcs: [
+    // === Trainer: Hiker Brick — vision 3 left ===
+    {
+      x: 12,
+      y: 8,
+      spriteKey: "trainer",
+      dialogue: ["Climb every peak! Battle every challenger!"],
+      altDialogue: ["These caverns are no joke!"],
+      trainer: {
+        name: "Hiker Brick",
+        intro: ["Climb every peak! Battle every challenger!", "Hiker Brick wants to battle!"],
+        victory: ["You scaled me like a cliff!"],
+        prize: 700,
+        flag: "trainerBrickDefeated",
+        visionRange: 3,
+        facing: "left",
+        party: [
+          { speciesId: "stonepup", level: 16 },
+          { speciesId: "pebbat", level: 16 },
+          { speciesId: "rockle", level: 18 },
+        ],
+      },
+    },
+    // === Gym Leader: Volcano Sage Magma — boss, Flame Badge reward ===
+    {
+      x: 9,
+      y: 12,
+      spriteKey: "gymleader",
+      dialogue: ["The flames of Emberfall sing for you..."],
+      altDialogue: ["Carry the Flame Badge well, traveler."],
+      trainer: {
+        name: "Volcano Sage Magma",
+        intro: [
+          "The flames of Emberfall sing for you...",
+          "I am Magma, Sage of the burning peak.",
+          "Prove your spirit, or be turned to ash!",
+        ],
+        victory: [
+          "Brilliant! Your fire matches mine!",
+          "You've earned the FLAME BADGE!",
+        ],
+        prize: 2200,
+        flag: "gymMagmaDefeated",
+        visionRange: 0,
+        facing: "up",
+        gymLeader: true,
+        potionCharges: 2,
+        rewardItem: "flame_badge",
+        party: [
+          { speciesId: "flarefox", level: 20 },
+          { speciesId: "pebbat", level: 21 },
+          { speciesId: "magmite", level: 22 },
+          { speciesId: "magmaroth", level: 25 },
+        ],
+      },
+    },
+  ],
+  signs: [],
+  fieldItems: [
+    { x: 14, y: 7, itemId: "burn_heal", qty: 2, flag: "fieldItem:emberfall:14:7" },
+  ],
+};
+
+// ============ FROSTPEAK TUNDRA (south of Emberfall — Frost Badge gym) ============
+const frostpeak: GameMap = {
+  id: "frostpeak",
+  name: "Frostpeak Tundra",
+  tiles: [
+    "XXXXXXXXSSXXXXXXXXXX",
+    "XZZZZZZZSSZZZZZZZZZX",
+    "XZZZZZZZSSZZZZZZZZZX",
+    "XZZTTZZZZZZZZZZTTZZX",
+    "XZZTTZZZZZZZZZZTTZZX",
+    "XZZZZZNZZZZZZZZZZZZX",
+    "XZZZZZZZZZZZZZZZZZZX",
+    "XZZZZWWWZZZWWWZZZZZX",
+    "XZZZZWWZZZZZWWZZZZZX",
+    "XZZTTZZZZZZZZZZTTZZX",
+    "XZZTTZZZZZZZZZZTTZZX",
+    "XZZZZZZZZZZZZZZNZZZX",
+    "XZZZZZZZZZNZZZZZZZZX",
+    "XZZZZZZZZZZZZZZZZZZX",
+    "XXXXXXXXXXXXXXXXXXXX",
+  ],
+  encounters: [
+    { speciesId: "frostpup", minLevel: 20, maxLevel: 24, weight: 30 },
+    { speciesId: "gustwing", minLevel: 20, maxLevel: 24, weight: 25 },
+    { speciesId: "snowveil", minLevel: 22, maxLevel: 26, weight: 20 },
+    { speciesId: "aquadrip", minLevel: 20, maxLevel: 24, weight: 10 },
+    { speciesId: "wisplet", minLevel: 20, maxLevel: 24, weight: 10 },
+    { speciesId: "krystalin", minLevel: 26, maxLevel: 28, weight: 5 },
+  ],
+  portals: [
+    { x: 8, y: 0, toMap: "emberfall", toX: 8, toY: 13 },
+    { x: 9, y: 0, toMap: "emberfall", toX: 9, toY: 13 },
+  ],
+  npcs: [
+    // === Trainer: Skater Ren — vision 4 down ===
+    {
+      x: 5,
+      y: 5,
+      spriteKey: "picnicker",
+      dialogue: ["Whoosh! Ice means speed!"],
+      altDialogue: ["Wanna try the slopes?"],
+      trainer: {
+        name: "Skater Ren",
+        intro: ["Whoosh! Ice means speed!", "Skater Ren challenges you!"],
+        victory: ["I'll get faster!"],
+        prize: 900,
+        flag: "trainerRenDefeated",
+        visionRange: 4,
+        facing: "down",
+        party: [
+          { speciesId: "gustwing", level: 22 },
+          { speciesId: "frostpup", level: 23 },
+        ],
+      },
+    },
+    // === Trainer: Tundra Mystic Voss — vision 4 left ===
+    {
+      x: 15,
+      y: 11,
+      spriteKey: "mentor",
+      dialogue: ["The cold reveals what the heart hides."],
+      altDialogue: ["You move with the wisdom of the peaks."],
+      trainer: {
+        name: "Mystic Voss",
+        intro: ["The cold reveals what the heart hides.", "Mystic Voss challenges you!"],
+        victory: ["Ah — your spirit shines brighter than mine."],
+        prize: 1100,
+        flag: "trainerVossDefeated",
+        visionRange: 4,
+        facing: "left",
+        party: [
+          { speciesId: "snowveil", level: 24 },
+          { speciesId: "wisplet", level: 24 },
+          { speciesId: "goolet", level: 26 },
+        ],
+      },
+    },
+    // === Gym Leader: Elder Yuki — Frost Badge reward (endgame) ===
+    {
+      x: 10,
+      y: 12,
+      spriteKey: "gymleader",
+      dialogue: ["So... you've climbed even Frostpeak?"],
+      altDialogue: [
+        "Three badges. The Verdant Region honours you, traveler.",
+        "The peaks beyond await your future journey...",
+      ],
+      trainer: {
+        name: "Elder Yuki",
+        intro: [
+          "So... you've climbed even Frostpeak?",
+          "I am Elder Yuki, keeper of the cold seasons.",
+          "Show me a fire that even my ice cannot quench!",
+        ],
+        victory: [
+          "A trainer of true devotion. The peaks recognise you.",
+          "You've earned the FROST BADGE!",
+        ],
+        prize: 3200,
+        flag: "gymYukiDefeated",
+        visionRange: 0,
+        facing: "up",
+        gymLeader: true,
+        potionCharges: 3,
+        rewardItem: "frost_badge",
+        party: [
+          { speciesId: "frostpup", level: 26 },
+          { speciesId: "snowveil", level: 27 },
+          { speciesId: "gustwing", level: 28 },
+          { speciesId: "krystalin", level: 30 },
+        ],
+      },
+    },
+  ],
+  signs: [],
+  fieldItems: [
+    { x: 17, y: 6, itemId: "revive", qty: 1, flag: "fieldItem:frostpeak:17:6" },
+    { x: 2, y: 13, itemId: "ultra_capsule", qty: 1, flag: "fieldItem:frostpeak:2:13" },
+  ],
+};
+
 export const MAPS: Record<string, GameMap> = {
   hearthwick,
   whisperwood,
   route1,
   lumencove,
   sunshore,
+  emberfall,
+  frostpeak,
 };
 
 export function findFieldItem(map: GameMap, x: number, y: number): FieldItem | null {

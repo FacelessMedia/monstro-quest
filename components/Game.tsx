@@ -73,6 +73,9 @@ import {
   TILE_SIGN,
   TILE_CUT_TREE,
   TILE_FIELD_ITEM,
+  TILE_LAVA,
+  TILE_LAVA_B,
+  TILE_SNOW,
   NPC_MENTOR,
   NPC_CLERK,
   NPC_TRAINER,
@@ -256,6 +259,8 @@ export function Game({ username, displayName, onLogout }: Props) {
   const [coins, setCoins] = useState(0);
   const [lastSavedLabel, setLastSavedLabel] = useState<string>("");
   const [hasBadge, setHasBadge] = useState(false);
+  const [hasFlame, setHasFlame] = useState(false);
+  const [hasFrost, setHasFrost] = useState(false);
 
   // Initialize state once
   useEffect(() => {
@@ -378,9 +383,13 @@ export function Game({ username, displayName, onLogout }: Props) {
         }
         // Update coin counter only when it actually changes
         setCoins((prev) => (prev === s.save.money ? prev : s.save.money));
-        // Toolbar badge indicator
-        const earned = !!s.save.flags["gymBrakDefeated"];
-        setHasBadge((prev) => (prev === earned ? prev : earned));
+        // Toolbar badge indicators
+        const stone = !!s.save.flags["gymBrakDefeated"];
+        const flame = !!s.save.flags["gymMagmaDefeated"];
+        const frost = !!s.save.flags["gymYukiDefeated"];
+        setHasBadge((prev) => (prev === stone ? prev : stone));
+        setHasFlame((prev) => (prev === flame ? prev : flame));
+        setHasFrost((prev) => (prev === frost ? prev : frost));
       }
       rafRef.current = requestAnimationFrame(loop);
     }
@@ -432,12 +441,19 @@ export function Game({ username, displayName, onLogout }: Props) {
     return t;
   }
 
-  /** Save-aware blocked-tile check. */
+  /** Save-aware blocked-tile check. Defeated trainers step aside (their tile becomes walkable). */
   function isBlockedNow(map: GameMap, x: number, y: number): boolean {
     const t = effectiveTile(map, x, y);
     if (t === null) return true;
     if (BLOCKED_TILES.has(t)) return true;
-    if (map.npcs.some((n) => n.x === x && n.y === y)) return true;
+    const npc = map.npcs.find((n) => n.x === x && n.y === y);
+    if (npc) {
+      const s = stateRef.current;
+      if (s && npc.trainer && s.save.flags[npc.trainer.flag]) {
+        return false; // defeated trainer — walk through
+      }
+      return true;
+    }
     return false;
   }
 
@@ -529,6 +545,22 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (isBlockedNow(map, tx, ty)) return;
     s.player.isMoving = true;
     s.player.moveProgress = 0;
+  }
+
+  /** Shared press/release plumbing used by keyboard events AND touch controls. */
+  function pressKey(key: string) {
+    const s = stateRef.current;
+    if (!s) return;
+    resumeAudio(); // chrome autoplay unlock on any user gesture
+    if (s.pressed.has(key)) return;
+    s.pressed.add(key);
+    handleKeyDown(key);
+  }
+
+  function releaseKey(key: string) {
+    const s = stateRef.current;
+    if (!s) return;
+    s.pressed.delete(key);
   }
 
   function handleKeyDown(key: string) {
@@ -2188,9 +2220,14 @@ export function Game({ username, displayName, onLogout }: Props) {
           // Check tile effects
           const map = MAPS[s.save.position.mapId];
           const tile = getTile(map, s.player.x, s.player.y);
-          // Check portal
+          // Check portal — respect flag-gated exits
           const portal = findPortal(map, s.player.x, s.player.y);
           if (portal) {
+            if (portal.requiresFlag && !s.save.flags[portal.requiresFlag]) {
+              startDialogue(portal.blockedMsg ?? ["The way is sealed for now."]);
+              centerCamera(s);
+              return;
+            }
             doTransition(portal.toMap, portal.toX, portal.toY, s.player.facing);
             centerCamera(s);
             return;
@@ -2467,6 +2504,8 @@ export function Game({ username, displayName, onLogout }: Props) {
     // Base layer
     if (t === "G" || t === "T" || t === "X" || t === "N" || t === "I" || t === "H" || t === "C" || t === "F") {
       drawSprite(ctx, TILE_GRASS, px, py, PIXEL_SCALE);
+    } else if (t === "Z") {
+      drawSprite(ctx, TILE_SNOW, px, py, PIXEL_SCALE);
     } else if (t === "P" || t === "D") {
       drawSprite(ctx, TILE_PATH, px, py, PIXEL_SCALE);
     } else if (t === "S") {
@@ -2475,6 +2514,10 @@ export function Game({ username, displayName, onLogout }: Props) {
       // 2-frame water animation, 600ms cycle
       const waterFrame = Math.floor(performance.now() / 600) % 2 === 0 ? TILE_WATER : TILE_WATER_B;
       drawSprite(ctx, waterFrame, px, py, PIXEL_SCALE);
+    } else if (t === "L") {
+      // 2-frame lava animation, 400ms cycle (faster than water for bubbling feel)
+      const lavaFrame = Math.floor(performance.now() / 400) % 2 === 0 ? TILE_LAVA : TILE_LAVA_B;
+      drawSprite(ctx, lavaFrame, px, py, PIXEL_SCALE);
     } else if (t === "B") {
       drawSprite(ctx, TILE_BUILDING, px, py, PIXEL_SCALE);
     }
@@ -2803,11 +2846,11 @@ export function Game({ username, displayName, onLogout }: Props) {
     // Render every known region as a stacked box (north → south progression).
     const mapIds = (m.data?.mapIds as string[]) || [];
     const boxW = 240;
-    const boxH = 42;
+    const boxH = 32;
     const cx = x + w / 2;
-    const startY = y + 56;
-    const gap = 12;
-    const order = ["hearthwick", "whisperwood", "route1", "lumencove", "sunshore"];
+    const startY = y + 50;
+    const gap = 8;
+    const order = ["hearthwick", "whisperwood", "route1", "lumencove", "sunshore", "emberfall", "frostpeak"];
     // Connecting path
     ctx.strokeStyle = "#6a4f2a";
     ctx.lineWidth = 6;
@@ -2828,8 +2871,8 @@ export function Game({ username, displayName, onLogout }: Props) {
       ctx.strokeStyle = isSelected ? "#ffe066" : isCurrent ? "#9fe0a0" : "#5a7a5a";
       ctx.lineWidth = isSelected ? 3 : 2;
       ctx.strokeRect(bx, by, boxW, boxH);
-      drawText(ctx, map.name, bx + boxW / 2, by + 18, "#fff", 12, "center");
-      drawText(ctx, isCurrent ? "● You are here" : "○", bx + boxW / 2, by + 34, isCurrent ? "#ffe066" : "#88a888", 10, "center");
+      drawText(ctx, map.name, bx + boxW / 2, by + 20, "#fff", 12, "center");
+      if (isCurrent) drawText(ctx, "●", bx + 16, by + 20, "#ffe066", 12, "left");
     }
     // Hint
     drawText(ctx, "↑ ↓ to browse  ·  ESC to close", x + w / 2, y + h - 18, "#b8b8d4", 11, "center");
@@ -3069,10 +3112,12 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (b.phase !== "throwBall" && b.phase !== "checkCatch" && !(b.phase === "victory" && b.ballOutcome === "caught")) {
       drawSprite(ctx, enemySp.sprite, CANVAS_W - 200 + enemyShake + enemyOffsetX, 30, 3);
     }
-    // Player sprite (back)
+    // Player's active Monstro (back-view stand-in: flipped horizontally + a touch larger).
+    // The trainer sprite was previously rendered here by mistake — this now shows the actual Monstro.
     const playerShake = b.playerShake > 0 ? Math.sin(b.playerShake * 30) * 4 : 0;
     const playerOffsetX = b.playerAnimX > 0 ? b.playerAnimX * 20 : 0;
-    drawSprite(ctx, PLAYER_BACK, 30 + playerShake + playerOffsetX, CANVAS_H - 200, 3);
+    const playerSpecies = SPECIES[c.speciesId];
+    drawSprite(ctx, playerSpecies.sprite, 20 + playerShake + playerOffsetX, CANVAS_H - 220, 3, true);
 
     // Ball animation
     if (b.phase === "throwBall" || b.phase === "checkCatch") {
@@ -3374,8 +3419,18 @@ export function Game({ username, displayName, onLogout }: Props) {
           ⛁ {coins}
         </span>
         {hasBadge && (
-          <span className="toolbar-btn" style={{ cursor: "default", color: "#d4cec0" }} title="Stone Badge — earned from Cave Warden Brak">
-            ◇ Stone Badge
+          <span className="toolbar-btn" style={{ cursor: "default", color: "#d4cec0" }} title="Stone Badge — Cave Warden Brak">
+            ◇ Stone
+          </span>
+        )}
+        {hasFlame && (
+          <span className="toolbar-btn" style={{ cursor: "default", color: "#ff8a3c" }} title="Flame Badge — Volcano Sage Magma">
+            ◇ Flame
+          </span>
+        )}
+        {hasFrost && (
+          <span className="toolbar-btn" style={{ cursor: "default", color: "#88c8ff" }} title="Frost Badge — Elder Yuki">
+            ◇ Frost
           </span>
         )}
         <button className="toolbar-btn" onClick={() => doSave(true)} title="Save game (or press ESC > SAVE)">
@@ -3391,6 +3446,78 @@ export function Game({ username, displayName, onLogout }: Props) {
         style={{ width: "min(96vw, 960px)", height: "auto" }}
       />
       <div className="hint">{hint}</div>
+      <div className="touch-controls" aria-label="Touch controls">
+        {/* D-pad on the left */}
+        <div className="dpad" role="group" aria-label="Directional pad">
+          <TouchButton className="dpad-btn dpad-up" label="▲" ariaLabel="Up" k="up" press={pressKey} release={releaseKey} />
+          <TouchButton className="dpad-btn dpad-down" label="▼" ariaLabel="Down" k="down" press={pressKey} release={releaseKey} />
+          <TouchButton className="dpad-btn dpad-left" label="◀" ariaLabel="Left" k="left" press={pressKey} release={releaseKey} />
+          <TouchButton className="dpad-btn dpad-right" label="▶" ariaLabel="Right" k="right" press={pressKey} release={releaseKey} />
+          <div className="dpad-center" aria-hidden="true" />
+        </div>
+        {/* Middle: Menu + Run pills */}
+        <div className="touch-middle">
+          <TouchButton className="action-btn muted" label="MENU" ariaLabel="Open menu" k="menu" press={pressKey} release={releaseKey} oneShot />
+          <TouchButton className="action-btn muted" label="RUN" ariaLabel="Hold to run" k="run" press={pressKey} release={releaseKey} />
+        </div>
+        {/* Action cluster on the right: A (confirm) + B (cancel) */}
+        <div className="action-cluster">
+          <div className="action-row">
+            <TouchButton className="action-btn secondary" label="B" ariaLabel="Cancel" k="cancel" press={pressKey} release={releaseKey} />
+            <TouchButton className="action-btn primary" label="A" ariaLabel="Confirm / Talk" k="confirm" press={pressKey} release={releaseKey} />
+          </div>
+        </div>
+      </div>
     </div>
+  );
+}
+
+/**
+ * A single touch button that emits a "key press" on pointer-down and a release
+ * on pointer-up/leave/cancel. Works equally well for mouse and touch input.
+ * `oneShot` releases immediately after press (used for menu-toggle buttons).
+ */
+function TouchButton({
+  className, label, ariaLabel, k, press, release, oneShot,
+}: {
+  className: string;
+  label: string;
+  ariaLabel: string;
+  k: string;
+  press: (k: string) => void;
+  release: (k: string) => void;
+  oneShot?: boolean;
+}) {
+  const isDownRef = useRef(false);
+  function onDown(e: React.PointerEvent<HTMLButtonElement>) {
+    e.preventDefault();
+    if (isDownRef.current) return;
+    isDownRef.current = true;
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    press(k);
+    if (oneShot) {
+      // Release on the next animation frame so the press is observed at least once.
+      requestAnimationFrame(() => release(k));
+    }
+  }
+  function onUp(e: React.PointerEvent<HTMLButtonElement>) {
+    e.preventDefault();
+    if (!isDownRef.current) return;
+    isDownRef.current = false;
+    release(k);
+  }
+  return (
+    <button
+      type="button"
+      className={className}
+      aria-label={ariaLabel}
+      onPointerDown={onDown}
+      onPointerUp={onUp}
+      onPointerCancel={onUp}
+      onPointerLeave={onUp}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {label}
+    </button>
   );
 }

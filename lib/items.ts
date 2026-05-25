@@ -18,7 +18,9 @@ export type ItemId =
   | "escape_rope"
   | "ether"
   | "stone_badge"
-  | "cut_stone";
+  | "cut_stone"
+  | "flame_badge"
+  | "frost_badge";
 
 export type ItemCategory = "capture" | "heal" | "revive" | "key" | "field" | "status" | "pp";
 
@@ -188,6 +190,26 @@ export const ITEMS: Record<ItemId, Item> = {
     price: 0,
     sellPrice: 0,
     description: "An ancient blade-shaped stone. Slices through Whisperwood's odd pink trees.",
+    keyItem: true,
+  },
+  flame_badge: {
+    id: "flame_badge",
+    name: "Flame Badge",
+    short: "F.Badge",
+    category: "key",
+    price: 0,
+    sellPrice: 0,
+    description: "Proof of victory over Volcano Sage Magma. Its heat still pulses faintly.",
+    keyItem: true,
+  },
+  frost_badge: {
+    id: "frost_badge",
+    name: "Frost Badge",
+    short: "Fr.Badge",
+    category: "key",
+    price: 0,
+    sellPrice: 0,
+    description: "Proof of victory over Elder Yuki of Frostpeak. Cool to the touch.",
     keyItem: true,
   },
 };
