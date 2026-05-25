@@ -22,6 +22,8 @@ export type GameSave = {
   monstroCaught: string[];
   playTimeSec: number;
   lastSavedAt: number;
+  /** Steps remaining of any active Repel effect — when > 0, encounters are skipped. */
+  repelSteps?: number;
 };
 
 // ===== Bag helpers (centralised so the rest of the codebase never touches

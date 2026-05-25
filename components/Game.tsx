@@ -12,6 +12,7 @@ import {
   removeFromBag,
 } from "../lib/save";
 import { ITEMS, ItemId } from "../lib/items";
+import { play, resumeAudio } from "../lib/audio";
 import {
   Creature,
   SPECIES,
@@ -23,6 +24,15 @@ import {
   expYield,
   effectiveness,
   TYPE_COLORS,
+  StatusCondition,
+  StatKey,
+  applyStatStage,
+  applyStatus,
+  applyEndOfTurnStatus,
+  canAct,
+  clearVolatile,
+  fullyHeal,
+  evolveCheck,
 } from "../lib/creatures";
 import {
   MAPS,
@@ -86,10 +96,14 @@ type MenuKind =
   | "battleFight"
   | "battleBag"
   | "battleNew"
+  | "battleSwitch"
   | "shop"
   | "shopQty"
   | "worldmap"
-  | "bag";
+  | "bag"
+  | "dex"
+  | "dex_detail"
+  | "pc";
 
 type Menu = {
   kind: MenuKind;
@@ -105,10 +119,13 @@ type BattlePhase =
   | "bagMenu"
   | "playerAttack"
   | "enemyAttack"
+  | "endTurnTick" // poison/burn residual damage messages between turns
   | "throwBall"
   | "checkCatch"
   | "brokeFree" // capsule broke, enemy will attack next
   | "switchIn" // showing "X fainted! Go Y!" before menu reopens
+  | "evolution" // animated evolve sequence
+  | "trainerSwitch" // trainer sends out their next Monstro
   | "victory"
   | "defeat"
   | "fled"
@@ -137,6 +154,16 @@ type BattleState = {
   enemyHpShown: number;
   playerHpShown: number;
   lastCapsule?: ItemId; // which capsule was last thrown — affects catch math
+  // === Trainer battle support ===
+  trainerBattle?: {
+    name: string;
+    party: Creature[];        // their roster
+    activeIdx: number;        // index of the one currently out
+    defeatedIdx: number[];    // indexes already KO'd
+    intro: string[];
+    victory: string[];
+    prize: number;            // coin prize on full defeat
+  };
 };
 
 type Player = {
@@ -266,6 +293,8 @@ export function Game({ username, displayName, onLogout }: Props) {
     function onKeyDown(e: KeyboardEvent) {
       const s = stateRef.current;
       if (!s) return;
+      // Unlock the Web Audio context on the first user gesture (Chrome policy).
+      resumeAudio();
       const key = normalizeKey(e.key);
       if (!key) return;
       // Prevent scroll
@@ -470,6 +499,25 @@ export function Game({ username, displayName, onLogout }: Props) {
       startDialogue(npc.dialogue, () => openStarterMenu());
       return;
     }
+    // === Trainer battle ===
+    if (npc.trainer) {
+      const t = npc.trainer;
+      if (s.save.flags[t.flag]) {
+        // Already defeated — show alternative banter
+        startDialogue(npc.altDialogue ?? ["Great battle earlier!"]);
+        return;
+      }
+      // Need at least one usable Monstro to be challenged
+      if (s.save.party.length === 0 || !s.save.party.some((c) => c.currentHp > 0)) {
+        startDialogue(["You need a Monstro first!"]);
+        return;
+      }
+      // Show intro, then launch trainer battle.
+      startDialogue(t.intro, () => {
+        startTrainerBattle(t);
+      });
+      return;
+    }
     if (npc.requiresFlag && !s.save.flags[npc.requiresFlag]) {
       startDialogue(npc.dialogue);
       return;
@@ -489,6 +537,13 @@ export function Game({ username, displayName, onLogout }: Props) {
           data: { itemIds: shopItems },
         };
         s2.mode = "menu";
+      });
+      return;
+    }
+    if (npc.pc) {
+      // Greeting → open PC storage
+      startDialogue(npc.dialogue, () => {
+        openPcStorage();
       });
       return;
     }
@@ -539,6 +594,10 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.menu) return;
     const m = s.menu;
+    // Audio: small blip on nav, confirm on accept
+    if (key === "up" || key === "down" || key === "left" || key === "right") play("cursor");
+    if (key === "confirm") play("confirm");
+    if (key === "cancel" || key === "menu") play("cancel");
     // Quantity selector uses ← / → and ↑ / ↓ to adjust qty
     if (m.kind === "shopQty") {
       const max = Math.max(1, m.data?.max ?? 1);
@@ -555,6 +614,17 @@ export function Game({ username, displayName, onLogout }: Props) {
         s.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
       }
       return;
+    }
+    // Dex detail: ↑/↓ cycles species and updates the sprite
+    if (m.kind === "dex_detail") {
+      const ids = (m.data?.speciesIds as string[]) || [];
+      if (key === "up") {
+        m.selected = (m.selected - 1 + ids.length) % ids.length;
+        return;
+      } else if (key === "down") {
+        m.selected = (m.selected + 1) % ids.length;
+        return;
+      }
     }
     if (key === "up") {
       m.selected = (m.selected - 1 + m.options.length) % m.options.length;
@@ -576,22 +646,89 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.menu) return;
     const k = s.menu.kind;
-    if (k === "pause" || k === "party" || k === "worldmap" || k === "bag") {
+    if (k === "pause" || k === "party" || k === "worldmap" || k === "bag" || k === "pc" || k === "dex") {
       closeMenu();
+    } else if (k === "dex_detail") {
+      // Go back to the dex list
+      const parent = s.menu.data?.parent as Menu | undefined;
+      s.menu = parent ?? undefined;
+      if (!parent) closeMenu();
     } else if (k === "shop") {
       // Exit shop with goodbye
       s.menu = undefined;
       startDialogue(["Thank you, come again!"]);
-    } else if (k === "battleFight") {
+    } else if (k === "battleFight" || k === "battleBag" || k === "battleSwitch") {
       if (s.battle) {
         s.battle.phase = "menu";
         s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
       }
-    } else if (k === "battleBag") {
-      if (s.battle) {
-        s.battle.phase = "menu";
-        s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+    }
+  }
+
+  /**
+   * Open the PC storage interface, accessible at the Lumencove healing center.
+   * Lists every party member then every storage member as a single menu so the
+   * player can swap them with SPACE.
+   */
+  function openPcStorage() {
+    const s = stateRef.current;
+    if (!s) return;
+    rebuildPcMenu(0);
+  }
+
+  function rebuildPcMenu(selected: number) {
+    const s = stateRef.current;
+    if (!s) return;
+    const partySlots = s.save.party.map((c) =>
+      `[P] ${SPECIES[c.speciesId].name} Lv${c.level} HP ${c.currentHp}/${c.maxHp}`
+    );
+    const storageSlots = s.save.storage.map((c) =>
+      `[B] ${SPECIES[c.speciesId].name} Lv${c.level} HP ${c.currentHp}/${c.maxHp}`
+    );
+    const options = [...partySlots, "─── BOX ───", ...storageSlots, "Close PC"];
+    s.menu = {
+      kind: "pc",
+      options,
+      selected: Math.min(selected, Math.max(0, options.length - 1)),
+      data: { partyCount: s.save.party.length, storageCount: s.save.storage.length },
+    };
+    s.mode = "menu";
+  }
+
+  /**
+   * Selecting a row in the PC moves that Monstro between Party and Box.
+   * The separator row and "Close PC" row are handled gracefully.
+   */
+  function handlePcConfirm(selected: number) {
+    const s = stateRef.current;
+    if (!s || !s.menu) return;
+    const partyCount = s.save.party.length;
+    const storageCount = s.save.storage.length;
+    const separatorIdx = partyCount;
+    const storageStart = partyCount + 1;
+    const closeIdx = partyCount + 1 + storageCount;
+    if (selected === closeIdx) { closeMenu(); return; }
+    if (selected === separatorIdx) return; // ignore divider
+    if (selected < partyCount) {
+      // Party row → move to storage. Don't allow if it's the last alive Monstro.
+      if (partyCount === 1) {
+        startDialogue(["You can't put your last Monstro in the PC!"]);
+        return;
       }
+      const [moved] = s.save.party.splice(selected, 1);
+      s.save.storage.push(moved);
+      rebuildPcMenu(selected);
+      return;
+    }
+    if (selected >= storageStart) {
+      const storageIdx = selected - storageStart;
+      if (s.save.party.length >= 6) {
+        startDialogue(["Your party is full!"]);
+        return;
+      }
+      const [moved] = s.save.storage.splice(storageIdx, 1);
+      s.save.party.push(moved);
+      rebuildPcMenu(s.save.party.length - 1);
     }
   }
 
@@ -643,17 +780,17 @@ export function Game({ username, displayName, onLogout }: Props) {
         const mapIds = Object.keys(MAPS);
         startMenu({ kind: "worldmap", options: mapIds, selected: mapIds.indexOf(s.save.position.mapId), data: { mapIds } });
       } else if (choice === "MONSTRODEX") {
-        const total = Object.keys(SPECIES).length;
-        const seen = s.save.monstroSeen.length;
-        const caught = s.save.monstroCaught.length;
-        const caughtList = s.save.monstroCaught.map((id) => `· ${SPECIES[id].name} (${SPECIES[id].types.join("/")})`);
-        // Close menu first so dialogue mode sticks
-        s.menu = undefined;
-        startDialogue([
-          `MONSTRODEX — Verdant Region`,
-          `Seen: ${seen}/${total}  ·  Caught: ${caught}/${total}`,
-          ...(caughtList.length ? caughtList : ["No Monstro caught yet. Throw a Catch Capsule!"]),
-        ]);
+        // Open paged Monstrodex listing every species the player has seen
+        const allIds = Object.keys(SPECIES);
+        // Show all species but mark unseen as "?" — classic dex experience
+        const labels = allIds.map((id) => {
+          const seen = s.save.monstroSeen.includes(id);
+          const caught = s.save.monstroCaught.includes(id);
+          const sp = SPECIES[id];
+          const dot = caught ? "● " : seen ? "○ " : "  ";
+          return `${dot}${seen ? sp.name : "???????"}`;
+        });
+        startMenu({ kind: "dex", options: labels, selected: 0, data: { speciesIds: allIds } });
       } else if (choice === "QUIT") {
         doSave(false);
         onLogout();
@@ -674,15 +811,18 @@ export function Game({ username, displayName, onLogout }: Props) {
       const choice = m.options[m.selected];
       if (choice === "FIGHT") openFightMenu();
       else if (choice === "BAG") openBattleBag();
-      else if (choice === "PARTY") {
-        startDialogue([
-          "You only have one active Monstro for now.",
-          "Switching support coming soon!",
-        ]);
-        s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
-      } else if (choice === "RUN") {
-        runFromBattle();
+      else if (choice === "PARTY") openBattleSwitchMenu();
+      else if (choice === "RUN") {
+        if (s.battle?.trainerBattle) {
+          // Cannot flee a trainer battle
+          startDialogue(["No! There's no running from a trainer battle!"]);
+          s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+        } else {
+          runFromBattle();
+        }
       }
+    } else if (m.kind === "battleSwitch") {
+      handleBattleSwitchConfirm(m.selected);
     } else if (m.kind === "battleFight") {
       const c = s.save.party[s.battle!.activeIdx];
       const move = c.moves[m.selected];
@@ -709,14 +849,74 @@ export function Game({ username, displayName, onLogout }: Props) {
         closeMenu();
         return;
       }
-      // Tapping an item just shows its description (out of battle)
       const it = ITEMS[itemId];
       const qty = getBagCount(s.save.bag, itemId);
+      // Field-use items (Repel) consume on use; healers/revives can also be applied
+      if (it.category === "field" && itemId === "repel") {
+        if (qty <= 0) { startDialogue([`You have no ${it.name} left.`]); s.menu = undefined; return; }
+        removeFromBag(s.save.bag, itemId, 1);
+        s.save.repelSteps = (s.save.repelSteps ?? 0) + 100;
+        s.menu = undefined;
+        startDialogue([
+          `Used Repel!`,
+          `Weak wild Monstro will stay away for the next 100 steps.`,
+        ]);
+        return;
+      }
+      if (it.category === "heal" && it.healAmount) {
+        // Pick first non-fainted creature below full HP
+        const idx = s.save.party.findIndex((c) => c.currentHp > 0 && c.currentHp < c.maxHp);
+        if (idx < 0) { s.menu = undefined; startDialogue([`All your Monstro are at full health.`]); return; }
+        const target = s.save.party[idx];
+        const before = target.currentHp;
+        target.currentHp = Math.min(target.maxHp, target.currentHp + it.healAmount);
+        const healed = target.currentHp - before;
+        removeFromBag(s.save.bag, itemId, 1);
+        s.menu = undefined;
+        startDialogue([`Used ${it.name} on ${SPECIES[target.speciesId].name}.`, `Restored ${healed} HP.`]);
+        return;
+      }
+      if (it.category === "revive" && it.reviveFactor) {
+        const idx = s.save.party.findIndex((c) => c.currentHp <= 0);
+        if (idx < 0) { s.menu = undefined; startDialogue([`No fainted Monstro to revive.`]); return; }
+        const target = s.save.party[idx];
+        target.currentHp = Math.max(1, Math.floor(target.maxHp * it.reviveFactor));
+        target.status = "ok";
+        removeFromBag(s.save.bag, itemId, 1);
+        s.menu = undefined;
+        startDialogue([`Revived ${SPECIES[target.speciesId].name}!`]);
+        return;
+      }
+      // Default: show description
       s.menu = undefined;
       startDialogue([
         `${it.name} (x${qty})`,
         it.description,
       ]);
+    } else if (m.kind === "dex") {
+      // Selecting a species opens its detail page (only if seen at least once)
+      const ids = (m.data?.speciesIds as string[]) || [];
+      const id = ids[m.selected];
+      if (!id) { closeMenu(); return; }
+      if (!s.save.monstroSeen.includes(id)) {
+        startDialogue([`You haven't encountered that Monstro yet.`]);
+        return;
+      }
+      s.menu = { kind: "dex_detail", options: ids, selected: m.selected, data: { speciesIds: ids, parent: m } };
+    } else if (m.kind === "dex_detail") {
+      // Pressing SPACE on the detail page goes back to the dex list
+      const ids = (m.data?.speciesIds as string[]) || [];
+      const parent = m.data?.parent as Menu | undefined;
+      if (parent) {
+        s.menu = parent;
+      } else {
+        // Fallback to closing
+        closeMenu();
+      }
+      void ids;
+    } else if (m.kind === "pc") {
+      // Toggle a creature between party and storage
+      handlePcConfirm(m.selected);
     } else if (m.kind === "shop") {
       // First option is always "Leave"
       const itemIds = (m.data?.itemIds as ItemId[]) || [];
@@ -824,6 +1024,73 @@ export function Game({ username, displayName, onLogout }: Props) {
     s.battle.phase = "fightMenu";
   }
 
+  /**
+   * Open a "send out which Monstro?" menu. Includes every party member with
+   * their level + HP. The currently active member is shown but not selectable.
+   */
+  function openBattleSwitchMenu() {
+    const s = stateRef.current;
+    if (!s || !s.battle) return;
+    const b = s.battle;
+    if (s.save.party.length <= 1) {
+      // Nothing to switch with, just close back to main menu
+      startDialogue([`You have no other Monstro to switch in.`]);
+      s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+      return;
+    }
+    const labels = s.save.party.map((c, i) => {
+      const sp = SPECIES[c.speciesId];
+      const tag = i === b.activeIdx ? " (active)" : c.currentHp <= 0 ? " (fainted)" : "";
+      const hpFrag = c.currentHp <= 0 ? "" : ` ${c.currentHp}/${c.maxHp}`;
+      return `${sp.name} Lv${c.level}${hpFrag}${tag}`;
+    });
+    s.menu = {
+      kind: "battleSwitch",
+      options: [...labels, "Cancel"],
+      selected: 0,
+    };
+  }
+
+  /**
+   * Confirm a switch: validate selection, perform the swap, and consume the turn
+   * by triggering the enemy's attack.
+   */
+  function handleBattleSwitchConfirm(selected: number) {
+    const s = stateRef.current;
+    if (!s || !s.battle) return;
+    const b = s.battle;
+    // Cancel row
+    if (selected >= s.save.party.length) {
+      s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+      return;
+    }
+    const target = s.save.party[selected];
+    const previousOptions = s.menu?.options ?? [];
+    if (selected === b.activeIdx) {
+      startDialogue([`That Monstro is already in battle!`]);
+      s.menu = { kind: "battleSwitch", options: previousOptions, selected };
+      return;
+    }
+    if (target.currentHp <= 0) {
+      startDialogue([`${SPECIES[target.speciesId].name} has fainted and cannot battle.`]);
+      s.menu = { kind: "battleSwitch", options: previousOptions, selected };
+      return;
+    }
+    const oldName = SPECIES[s.save.party[b.activeIdx].speciesId].name;
+    const newName = SPECIES[target.speciesId].name;
+    // Clear volatile (stat stages) on the outgoing creature
+    clearVolatile(s.save.party[b.activeIdx]);
+    b.activeIdx = selected;
+    s.menu = undefined;
+    queueBattleMessages([
+      { text: `${oldName}, come back!`, next: "enemyAttack" },
+      { text: `Go, ${newName}!`, action: () => { /* sprite will refresh from activeIdx */ } },
+    ]);
+    // After the switch-in message resolves, enemy attacks (switching costs a turn).
+    // We chain enemyAttack via the "next" of the second message; advanceBattlePhase
+    // already handles `enemyAttack` properly.
+  }
+
   function openBattleBag() {
     const s = stateRef.current;
     if (!s || !s.battle) return;
@@ -843,7 +1110,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
-    if (b.phase === "intro" || b.phase === "playerAttack" || b.phase === "enemyAttack" || b.phase === "throwBall" || b.phase === "checkCatch" || b.phase === "brokeFree" || b.phase === "switchIn") {
+    if (b.phase === "intro" || b.phase === "playerAttack" || b.phase === "enemyAttack" || b.phase === "endTurnTick" || b.phase === "throwBall" || b.phase === "checkCatch" || b.phase === "brokeFree" || b.phase === "switchIn" || b.phase === "trainerSwitch") {
       // Allow skipping text
       if ((key === "confirm" || key === "cancel") && b.messageProgress < b.message.length) {
         b.messageProgress = b.message.length;
@@ -907,13 +1174,32 @@ export function Game({ username, displayName, onLogout }: Props) {
     } else if (b.phase === "playerAttack") {
       // After player attack message, check if enemy fainted, else enemy attacks
       if (b.enemy.currentHp <= 0) {
+        play("faint");
         onEnemyFainted();
       } else {
         doEnemyAttack();
       }
     } else if (b.phase === "enemyAttack") {
       if (s.save.party[b.activeIdx].currentHp <= 0) {
+        play("faint");
         onPlayerFainted();
+      } else {
+        // End-of-turn residual status damage (player first then enemy)
+        const tickMsgs = endOfTurnTick(s);
+        if (tickMsgs.length > 0) {
+          queueBattleMessages(tickMsgs);
+        } else {
+          b.phase = "menu";
+          s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+        }
+      }
+    } else if (b.phase === "endTurnTick") {
+      // After residual tick message finishes, decide next step (faint or menu)
+      const p = s.save.party[b.activeIdx];
+      if (p.currentHp <= 0) {
+        onPlayerFainted();
+      } else if (b.enemy.currentHp <= 0) {
+        onEnemyFainted();
       } else {
         b.phase = "menu";
         s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
@@ -939,7 +1225,145 @@ export function Game({ username, displayName, onLogout }: Props) {
       // After fainted-switch message, open main menu
       b.phase = "menu";
       s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+    } else if (b.phase === "trainerSwitch") {
+      // Trainer sent out next Monstro — return to menu
+      b.phase = "menu";
+      s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
     }
+  }
+
+  /**
+   * Resolve a single move executed by `attacker` against `defender`.
+   * Returns the message queue to push. Centralised so player and enemy share
+   * the exact same rules (canAct, accuracy, damage, status riders, stat changes).
+   */
+  function executeMove(
+    attacker: Creature,
+    defender: Creature,
+    moveSlot: { moveId: string; pp: number; maxPp: number },
+    actorLabel: string,
+    targetLabel: string,
+    isPlayer: boolean,
+    nextPhase: BattlePhase
+  ): { text: string; next?: BattlePhase; action?: () => void }[] {
+    const s = stateRef.current!;
+    const b = s.battle!;
+    const move = MOVES[moveSlot.moveId];
+
+    // Sleep / paralysis check
+    const act = canAct(attacker);
+    if (act.msg && act.wokeUp) {
+      // woke up this turn and acts immediately, push wake-up message first
+      // (the message itself is queued)
+    }
+    if (!act.canAct) {
+      return [{ text: `${actorLabel} ${act.msg}`, next: nextPhase }];
+    }
+
+    moveSlot.pp = Math.max(0, moveSlot.pp - 1);
+    if (isPlayer) b.playerAnimX = 1; else b.enemyAnimX = 1;
+
+    const res = damageCalc(attacker, defender, move);
+    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [];
+    // Lead with optional wake-up announcement.
+    if (act.msg) msgs.push({ text: `${actorLabel} ${act.msg}`, next: nextPhase });
+    msgs.push({ text: `${actorLabel} used ${move.name}!`, next: nextPhase });
+
+    if (res.missed) {
+      msgs.push({ text: `It missed!` });
+      return msgs;
+    }
+
+    // Apply damage
+    if (move.power > 0) {
+      defender.currentHp = Math.max(0, defender.currentHp - res.dmg);
+      if (isPlayer) b.enemyShake = 0.5; else b.playerShake = 0.5;
+      if (res.dmg > 0) play(res.crit ? "crit" : "hit");
+      if (res.crit && res.dmg > 0) msgs.push({ text: "A critical hit!" });
+      if (res.eff === 0) msgs.push({ text: "It had no effect..." });
+      else if (res.eff >= 2) msgs.push({ text: "It's super effective!" });
+      else if (res.eff > 0 && res.eff < 1) msgs.push({ text: "It's not very effective..." });
+    }
+
+    // Apply secondary status (only if target still alive)
+    if (move.effect?.inflictStatus && defender.currentHp > 0) {
+      const { kind, chance } = move.effect.inflictStatus;
+      if (Math.random() < chance) {
+        const ok = applyStatus(defender, kind);
+        if (ok) {
+          const verb =
+            kind === "psn" ? "was poisoned!" :
+            kind === "brn" ? "was burned!" :
+            kind === "par" ? "is paralysed! It may be unable to move!" :
+            kind === "slp" ? "fell asleep!" : "was afflicted!";
+          msgs.push({ text: `${targetLabel} ${verb}` });
+        }
+      }
+    }
+
+    // Apply stat-stage change
+    if (move.effect?.statChange) {
+      const sc = move.effect.statChange;
+      if (sc.chance === undefined || Math.random() < sc.chance) {
+        const target = sc.target === "self" ? attacker : defender;
+        const tgtLabel = sc.target === "self" ? actorLabel : targetLabel;
+        const result = applyStatStage(target, sc.stat, sc.delta);
+        if (result.capped) {
+          msgs.push({ text: `${tgtLabel}'s ${sc.stat.toUpperCase()} won't go ${sc.delta > 0 ? "higher" : "lower"}!` });
+        } else {
+          const word = describeStatChange(sc.delta);
+          msgs.push({ text: `${tgtLabel}'s ${sc.stat.toUpperCase()} ${word}` });
+        }
+      }
+    }
+
+    return msgs;
+  }
+
+  function describeStatChange(delta: number): string {
+    if (delta >= 2) return "sharply rose!";
+    if (delta === 1) return "rose!";
+    if (delta === -1) return "fell!";
+    if (delta <= -2) return "sharply fell!";
+    return "didn't change.";
+  }
+
+  /**
+   * Apply end-of-turn residual damage from poison/burn to both combatants.
+   * Returns the message queue, with the final message chained back to
+   * `endTurnTick` so we can resolve any fainting after they're shown.
+   */
+  function endOfTurnTick(s: GameRef): { text: string; next?: BattlePhase; action?: () => void }[] {
+    if (!s.battle) return [];
+    const b = s.battle;
+    const c = s.save.party[b.activeIdx];
+    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [];
+    const playerTick = c.currentHp > 0 ? applyEndOfTurnStatus(c) : null;
+    if (playerTick) msgs.push({ text: `${SPECIES[c.speciesId].name} ${playerTick.msg}`, next: "endTurnTick" });
+    const enemyTick = b.enemy.currentHp > 0 ? applyEndOfTurnStatus(b.enemy) : null;
+    if (enemyTick) msgs.push({ text: `Wild ${SPECIES[b.enemy.speciesId].name} ${enemyTick.msg}`, next: "endTurnTick" });
+    // Always chain the last message to endTurnTick so we resolve faint/menu transitions
+    if (msgs.length > 0) msgs[msgs.length - 1].next = "endTurnTick";
+    return msgs;
+  }
+
+  /**
+   * Trigger an evolution sequence inline within the post-victory message chain.
+   * Returns extra messages to append, including an action that mutates the
+   * creature when the player advances past the "X is evolving!" line.
+   */
+  function evolutionMessages(c: Creature): { text: string; next?: BattlePhase; action?: () => void }[] {
+    const sp = SPECIES[c.speciesId];
+    if (!sp.evolution || c.level < sp.evolution.level) return [];
+    const fromName = sp.name;
+    const toName = SPECIES[sp.evolution.toSpeciesId].name;
+    return [
+      { text: `Huh? ${fromName} is evolving!`, action: () => {
+        // The evolution mutation runs when this message becomes the current one
+        evolveCheck(c);
+      } },
+      { text: `${fromName} evolved into ${toName}!` },
+    ];
   }
 
   function doPlayerAttack(moveIdx: number) {
@@ -948,23 +1372,12 @@ export function Game({ username, displayName, onLogout }: Props) {
     const b = s.battle;
     const c = s.save.party[b.activeIdx];
     const moveSlot = c.moves[moveIdx];
-    const move = MOVES[moveSlot.moveId];
-    moveSlot.pp = Math.max(0, moveSlot.pp - 1);
-    b.playerAnimX = 1; // trigger animation
-    if (Math.random() * 100 > move.accuracy) {
-      battleMessage(`${SPECIES[c.speciesId].name} used ${move.name}! It missed!`, "playerAttack");
-      return;
-    }
-    const res = damageCalc(c, b.enemy, move);
-    b.enemy.currentHp = Math.max(0, b.enemy.currentHp - res.dmg);
-    b.enemyShake = 0.5;
-    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [
-      { text: `${SPECIES[c.speciesId].name} used ${move.name}!`, next: "playerAttack" },
-    ];
-    if (res.crit && res.dmg > 0) msgs.push({ text: "A critical hit!" });
-    if (res.eff === 0) msgs.push({ text: "It had no effect..." });
-    else if (res.eff >= 2) msgs.push({ text: "It's super effective!" });
-    else if (res.eff > 0 && res.eff < 1) msgs.push({ text: "It's not very effective..." });
+    const msgs = executeMove(
+      c, b.enemy, moveSlot,
+      SPECIES[c.speciesId].name,
+      `Wild ${SPECIES[b.enemy.speciesId].name}`,
+      true, "playerAttack"
+    );
     queueBattleMessages(msgs);
   }
 
@@ -977,24 +1390,17 @@ export function Game({ username, displayName, onLogout }: Props) {
       battleMessage(`${SPECIES[b.enemy.speciesId].name} did nothing!`, "enemyAttack");
       return;
     }
-    const moveSlot = b.enemy.moves[Math.floor(Math.random() * b.enemy.moves.length)];
-    const move = MOVES[moveSlot.moveId];
+    // Enemy AI: heavily prefer non-zero-PP damage moves; fall back to any move.
+    const usable = b.enemy.moves.filter((m) => m.pp > 0);
+    const pool = usable.length > 0 ? usable : b.enemy.moves;
+    const moveSlot = pool[Math.floor(Math.random() * pool.length)];
     const target = s.save.party[b.activeIdx];
-    b.enemyAnimX = 1;
-    if (Math.random() * 100 > move.accuracy) {
-      battleMessage(`Wild ${SPECIES[b.enemy.speciesId].name} used ${move.name}! It missed!`, "enemyAttack");
-      return;
-    }
-    const res = damageCalc(b.enemy, target, move);
-    target.currentHp = Math.max(0, target.currentHp - res.dmg);
-    b.playerShake = 0.5;
-    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [
-      { text: `Wild ${SPECIES[b.enemy.speciesId].name} used ${move.name}!`, next: "enemyAttack" },
-    ];
-    if (res.crit && res.dmg > 0) msgs.push({ text: "A critical hit!" });
-    if (res.eff === 0) msgs.push({ text: "It had no effect..." });
-    else if (res.eff >= 2) msgs.push({ text: "It's super effective!" });
-    else if (res.eff > 0 && res.eff < 1) msgs.push({ text: "It's not very effective..." });
+    const msgs = executeMove(
+      b.enemy, target, moveSlot,
+      `Wild ${SPECIES[b.enemy.speciesId].name}`,
+      SPECIES[target.speciesId].name,
+      false, "enemyAttack"
+    );
     queueBattleMessages(msgs);
   }
 
@@ -1004,22 +1410,67 @@ export function Game({ username, displayName, onLogout }: Props) {
     const b = s.battle;
     const c = s.save.party[b.activeIdx];
     const enemySpecies = SPECIES[b.enemy.speciesId];
-    const xp = expYield(enemySpecies, b.enemy.level);
+    // Trainer Monstro give 1.5x EXP (Gen 1 style)
+    const xpBase = expYield(enemySpecies, b.enemy.level);
+    const xp = b.trainerBattle ? Math.floor(xpBase * 1.5) : xpBase;
     const result = gainExp(c, xp);
-    // Coin reward — scales with enemy level (10c/level, ±20%)
-    const coinReward = Math.max(5, Math.round(b.enemy.level * 10 * (0.9 + Math.random() * 0.2)));
-    s.save.money += coinReward;
-    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [
-      { text: `Wild ${enemySpecies.name} fainted!`, next: "victory" },
-      { text: `${SPECIES[c.speciesId].name} gained ${xp} EXP!` },
-      { text: `You found ${coinReward} coins!` },
-    ];
+    const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [];
+
+    if (b.trainerBattle) {
+      msgs.push({ text: `${b.trainerBattle.name}'s ${enemySpecies.name} fainted!`, next: "victory" });
+    } else {
+      msgs.push({ text: `Wild ${enemySpecies.name} fainted!`, next: "victory" });
+    }
+    msgs.push({ text: `${SPECIES[c.speciesId].name} gained ${xp} EXP!` });
+
+    // Coin reward only for wild battles (trainer pays a prize at end)
+    if (!b.trainerBattle) {
+      const coinReward = Math.max(5, Math.round(b.enemy.level * 10 * (0.9 + Math.random() * 0.2)));
+      s.save.money += coinReward;
+      msgs.push({ text: `You found ${coinReward} coins!` });
+    }
+
     if (result.leveledUp) {
-      msgs.push({ text: `${SPECIES[c.speciesId].name} grew to Lv${c.level}!` });
+      msgs.push({ text: `${SPECIES[c.speciesId].name} grew to Lv${c.level}!`, action: () => play("levelup") });
       for (const mvName of result.newMoves) {
         msgs.push({ text: `${SPECIES[c.speciesId].name} learned ${mvName}!` });
       }
+      const evoMsgs = evolutionMessages(c);
+      if (evoMsgs.length > 0) {
+        evoMsgs[0].action = () => play("evolution");
+        msgs.push(...evoMsgs);
+      }
     }
+
+    // Trainer: queue next Monstro, or end battle with prize
+    if (b.trainerBattle) {
+      const t = b.trainerBattle;
+      t.defeatedIdx.push(t.activeIdx);
+      const nextIdx = t.party.findIndex((_, i) => !t.defeatedIdx.includes(i));
+      if (nextIdx >= 0) {
+        // Send out next
+        const nextMon = t.party[nextIdx];
+        msgs.push({ text: `${t.name} is about to send out ${SPECIES[nextMon.speciesId].name}!`, action: () => {
+          const s2 = stateRef.current;
+          if (!s2 || !s2.battle || !s2.battle.trainerBattle) return;
+          s2.battle.trainerBattle.activeIdx = nextIdx;
+          s2.battle.enemy = nextMon;
+          s2.battle.enemyMaxHp = nextMon.maxHp;
+          s2.battle.enemyHpShown = nextMon.currentHp;
+          if (!s2.save.monstroSeen.includes(nextMon.speciesId)) s2.save.monstroSeen.push(nextMon.speciesId);
+        } });
+        msgs.push({ text: `${t.name} sent out ${SPECIES[nextMon.speciesId].name}!`, next: "trainerSwitch" });
+      } else {
+        // Final defeat — pay prize and set flag
+        s.save.money += t.prize;
+        const flag = (b as any).trainerFlag as string | undefined;
+        if (flag) s.save.flags[flag] = true;
+        msgs.push({ text: `You defeated ${t.name}!` });
+        for (const v of t.victory) msgs.push({ text: v });
+        msgs.push({ text: `Received ${t.prize} coins as prize!` });
+      }
+    }
+
     queueBattleMessages(msgs);
   }
 
@@ -1107,6 +1558,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
+    play("catch");
     // Add caught creature to party or storage
     if (!s.save.monstroCaught.includes(b.enemy.speciesId)) {
       s.save.monstroCaught.push(b.enemy.speciesId);
@@ -1124,6 +1576,8 @@ export function Game({ username, displayName, onLogout }: Props) {
   function finishBattle() {
     const s = stateRef.current;
     if (!s) return;
+    // Reset volatile (stat stages) on every party member so they don't bleed across fights.
+    for (const c of s.save.party) clearVolatile(c);
     s.battle = undefined;
     s.menu = undefined;
     s.mode = "overworld";
@@ -1159,6 +1613,53 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (s.battle.activeIdx < 0) s.battle.activeIdx = 0;
   }
 
+  /**
+   * Start a trainer battle. The trainer's first Monstro is sent out and any
+   * subsequent KOs trigger their next; trainer wins broadcast a prize.
+   */
+  function startTrainerBattle(t: { name: string; party: { speciesId: string; level: number }[]; intro: string[]; victory: string[]; prize: number; flag: string }) {
+    const s = stateRef.current;
+    if (!s) return;
+    if (t.party.length === 0) return;
+    const party = t.party.map((p) => createWild(p.speciesId, p.level));
+    const first = party[0];
+    if (!s.save.monstroSeen.includes(first.speciesId)) s.save.monstroSeen.push(first.speciesId);
+    s.battle = {
+      enemy: first,
+      enemyMaxHp: first.maxHp,
+      activeIdx: s.save.party.findIndex((p) => p.currentHp > 0),
+      phase: "intro",
+      message: `${t.name} sent out ${SPECIES[first.speciesId].name}!`,
+      messageProgress: 0,
+      messageQueue: [],
+      selected: 0,
+      fightSelected: 0,
+      bagSelected: 0,
+      playerAnimX: 0,
+      enemyAnimX: 0,
+      playerShake: 0,
+      enemyShake: 0,
+      ballAnim: 0,
+      fadeIn: 1,
+      turnOver: false,
+      enemyHpShown: first.currentHp,
+      playerHpShown: s.save.party[0]?.currentHp || 0,
+      trainerBattle: {
+        name: t.name,
+        party,
+        activeIdx: 0,
+        defeatedIdx: [],
+        intro: t.intro,
+        victory: t.victory,
+        prize: t.prize,
+      },
+    };
+    // Persist the flag reference on the battle so we can set it after victory.
+    (s.battle as any).trainerFlag = t.flag;
+    s.mode = "battle";
+    if (s.battle.activeIdx < 0) s.battle.activeIdx = 0;
+  }
+
   // Compute a contextual help string for the bottom-of-screen hint
   function currentHint(s: GameRef): string {
     if (s.mode === "dialogue") return "SPACE/ENTER · Continue · (hold to fast-forward)";
@@ -1173,8 +1674,14 @@ export function Game({ username, displayName, onLogout }: Props) {
       if (s.menu?.kind === "shop") return "↑ ↓ Browse · SPACE Buy · ESC Leave";
       if (s.menu?.kind === "shopQty") return "← → Change qty · SPACE Confirm · ESC Back";
       if (s.menu?.kind === "worldmap") return "↑ ↓ Browse regions · ESC Close";
-      if (s.menu?.kind === "bag") return "↑ ↓ Browse · SPACE Inspect · ESC Close";
+      if (s.menu?.kind === "bag") return "↑ ↓ Browse · SPACE Use/Inspect · ESC Close";
+      if (s.menu?.kind === "dex") return "↑ ↓ Browse · SPACE View · ESC Back";
+      if (s.menu?.kind === "dex_detail") return "↑ ↓ Browse · SPACE/ESC Back";
+      if (s.menu?.kind === "pc") return "↑ ↓ Browse · SPACE Swap · ESC Close";
       return "Arrows · Navigate · SPACE · Select · ESC · Close";
+    }
+    if (s.mode === "battle" && s.menu?.kind === "battleSwitch") {
+      return "↑ ↓ Browse · SPACE Switch · ESC Back";
     }
     return "Arrows/WASD · Move · SPACE · Talk · ESC · Menu · SHIFT · Run";
   }
@@ -1218,8 +1725,15 @@ export function Game({ username, displayName, onLogout }: Props) {
             centerCamera(s);
             return;
           }
-          // Tall grass encounter
-          if (tile === "T") {
+          // Decrement Repel counter on each step taken
+          if ((s.save.repelSteps ?? 0) > 0) {
+            s.save.repelSteps = (s.save.repelSteps ?? 0) - 1;
+            if (s.save.repelSteps === 0) {
+              startDialogue(["The Repel's effect wore off."]);
+            }
+          }
+          // Tall grass encounter — suppressed while Repel is active
+          if (tile === "T" && (s.save.repelSteps ?? 0) <= 0) {
             const enc = rollEncounter(map);
             if (enc && s.save.party.some((c) => c.currentHp > 0)) {
               startBattle(enc.speciesId, enc.level);
@@ -1313,10 +1827,8 @@ export function Game({ username, displayName, onLogout }: Props) {
   function healAll() {
     const s = stateRef.current;
     if (!s) return;
-    s.save.party.forEach((c) => {
-      c.currentHp = c.maxHp;
-      c.moves.forEach((m) => { m.pp = m.maxPp; });
-    });
+    play("heal");
+    s.save.party.forEach((c) => { fullyHeal(c); });
   }
 
   // ========== RENDER ==========
@@ -1542,6 +2054,12 @@ export function Game({ username, displayName, onLogout }: Props) {
       renderWorldMap(ctx, s, m);
     } else if (m.kind === "bag") {
       renderBagMenu(ctx, s, m);
+    } else if (m.kind === "dex") {
+      renderDexList(ctx, s, m);
+    } else if (m.kind === "dex_detail") {
+      renderDexDetail(ctx, s, m);
+    } else if (m.kind === "pc") {
+      renderPcMenu(ctx, s, m);
     }
   }
 
@@ -1735,6 +2253,160 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
   }
 
+  /**
+   * Compact, scrollable Monstrodex list. Shows ● for caught, ○ for seen, blank
+   * for unseen. Pressing SPACE on a seen entry opens the detail page.
+   */
+  function renderDexList(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.6);
+    const ids = (m.data?.speciesIds as string[]) || [];
+    const w = 480;
+    const h = 360;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 8;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawText(ctx, "MONSTRODEX", x + w / 2, y + 22, "#ffe066", 16, "center");
+    const seenCount = s.save.monstroSeen.length;
+    const caughtCount = s.save.monstroCaught.length;
+    const total = ids.length;
+    drawText(ctx, `Seen ${seenCount}/${total}   Caught ${caughtCount}/${total}`, x + w / 2, y + 42, "#88c8ff", 11, "center");
+
+    const listX = x + 14;
+    const rowH = 20;
+    const startY = y + 60;
+    const visibleRows = Math.floor((h - 90) / rowH);
+    // Scroll so selected stays visible
+    const startIdx = Math.max(0, Math.min(m.selected - Math.floor(visibleRows / 2), ids.length - visibleRows));
+    for (let i = 0; i < visibleRows && startIdx + i < ids.length; i++) {
+      const realIdx = startIdx + i;
+      const oy = startY + i * rowH;
+      if (realIdx === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.15)";
+        ctx.fillRect(listX, oy - 2, w - 28, rowH);
+        drawText(ctx, ">", listX + 4, oy + 13, "#ffe066", 13, "left");
+      }
+      drawText(ctx, `#${(realIdx + 1).toString().padStart(2, "0")}`, listX + 20, oy + 13, "#aaa", 11, "left");
+      drawText(ctx, m.options[realIdx] ?? "", listX + 70, oy + 13, "#fff", 12, "left");
+    }
+    drawText(ctx, "SPACE View · ESC Back", x + w / 2, y + h - 14, "#b8b8d4", 11, "center");
+  }
+
+  /** Full-page detail of a single species — sprite, stats, description. */
+  function renderDexDetail(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.7);
+    const ids = (m.data?.speciesIds as string[]) || [];
+    const id = ids[m.selected];
+    if (!id) return;
+    const sp = SPECIES[id];
+    if (!sp) return;
+    const seen = s.save.monstroSeen.includes(id);
+    const caught = s.save.monstroCaught.includes(id);
+
+    const w = 520;
+    const h = 360;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 8;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+
+    drawText(ctx, `#${(m.selected + 1).toString().padStart(3, "0")}  ${sp.name.toUpperCase()}`, x + w / 2, y + 24, "#ffe066", 16, "center");
+
+    if (seen) {
+      // Sprite preview
+      drawSprite(ctx, sp.sprite, x + 24, y + 50, 3);
+      // Types
+      let typeX = x + 24;
+      const typeY = y + 200;
+      for (const t of sp.types) {
+        ctx.fillStyle = TYPE_COLORS[t];
+        ctx.fillRect(typeX, typeY, 70, 18);
+        drawText(ctx, t.toUpperCase(), typeX + 35, typeY + 13, "#1a1326", 10, "center");
+        typeX += 78;
+      }
+      // Stats panel
+      const panelX = x + 160;
+      const panelY = y + 56;
+      drawText(ctx, "Base Stats", panelX, panelY, "#88c8ff", 11, "left");
+      const stats: [string, number][] = [["HP", sp.baseStats.hp], ["ATK", sp.baseStats.atk], ["DEF", sp.baseStats.def], ["SPD", sp.baseStats.spd]];
+      for (let i = 0; i < stats.length; i++) {
+        const sy = panelY + 18 + i * 18;
+        drawText(ctx, stats[i][0], panelX, sy, "#fff", 12, "left");
+        // Bar
+        const bw = 160;
+        ctx.fillStyle = "#1a1326";
+        ctx.fillRect(panelX + 50, sy - 10, bw, 10);
+        ctx.fillStyle = sp.color;
+        ctx.fillRect(panelX + 50, sy - 10, Math.min(bw, (bw * stats[i][1]) / 150), 10);
+        drawText(ctx, `${stats[i][1]}`, panelX + 50 + bw + 8, sy, "#fff", 11, "left");
+      }
+      // Description (wrapped)
+      const descLines = wrapText(ctx, sp.description, w - 48, "12px monospace");
+      let dy = y + 232;
+      for (const ln of descLines.slice(0, 3)) {
+        drawText(ctx, ln, x + 24, dy, "#cfcfdc", 12, "left");
+        dy += 16;
+      }
+      // Location
+      if (sp.locations && sp.locations.length > 0) {
+        drawText(ctx, "Found:", x + 24, y + 296, "#ffe066", 11, "left");
+        drawText(ctx, sp.locations.join(" · "), x + 72, y + 296, "#fff", 11, "left");
+      }
+      // Caught indicator
+      if (caught) drawText(ctx, "● OWNED", x + w - 24, y + 24, "#5fae5f", 12, "right");
+      else drawText(ctx, "○ SEEN", x + w - 24, y + 24, "#88c8ff", 12, "right");
+    } else {
+      drawText(ctx, "Unknown — encounter this Monstro in the wild!", x + w / 2, y + h / 2, "#aaa", 12, "center");
+    }
+    drawText(ctx, "↑ ↓ Browse · SPACE/ESC Back", x + w / 2, y + h - 14, "#b8b8d4", 11, "center");
+  }
+
+  /** Simple PC storage UI — vertical list of Party then Box, swap with SPACE. */
+  function renderPcMenu(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.6);
+    const w = 480;
+    const h = 360;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 8;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+
+    drawText(ctx, "STORAGE PC", x + w / 2, y + 22, "#ffe066", 16, "center");
+    drawText(ctx, "[P] Party · [B] Box · SPACE to swap", x + w / 2, y + 42, "#88c8ff", 10, "center");
+
+    const partyCount = (m.data?.partyCount as number) ?? s.save.party.length;
+    const startY = y + 64;
+    const rowH = 20;
+    const visibleRows = Math.floor((h - 100) / rowH);
+    const startIdx = Math.max(0, Math.min(m.selected - Math.floor(visibleRows / 2), Math.max(0, m.options.length - visibleRows)));
+    for (let i = 0; i < visibleRows && startIdx + i < m.options.length; i++) {
+      const realIdx = startIdx + i;
+      const oy = startY + i * rowH;
+      if (realIdx === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.15)";
+        ctx.fillRect(x + 14, oy - 2, w - 28, rowH);
+        drawText(ctx, ">", x + 18, oy + 13, "#ffe066", 13, "left");
+      }
+      const label = m.options[realIdx];
+      // Color party rows green, storage rows blue, divider grey, close white
+      let color = "#fff";
+      if (label.startsWith("[P]")) color = "#9fe0a0";
+      else if (label.startsWith("[B]")) color = "#88c8ff";
+      else if (label.startsWith("───")) color = "#7a7a7a";
+      drawText(ctx, label, x + 34, oy + 13, color, 12, "left");
+    }
+    drawText(ctx, `Party ${partyCount}/6   Box ${s.save.storage.length}`, x + w / 2, y + h - 14, "#b8b8d4", 11, "center");
+  }
+
   function renderBattle(ctx: CanvasRenderingContext2D, s: GameRef) {
     if (!s.battle) return;
     const b = s.battle;
@@ -1791,12 +2463,12 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
 
     // Enemy HP box (top-left)
-    drawBattleHpBox(ctx, 16, 16, enemySp.name, b.enemy.level, b.enemyHpShown, b.enemyMaxHp, false);
+    drawBattleHpBox(ctx, 16, 16, enemySp.name, b.enemy.level, b.enemyHpShown, b.enemyMaxHp, false, b.enemy.status);
     // Player HP box (bottom-right of arena)
-    drawBattleHpBox(ctx, CANVAS_W - 240, CANVAS_H - 200, SPECIES[c.speciesId].name, c.level, b.playerHpShown, c.maxHp, true);
+    drawBattleHpBox(ctx, CANVAS_W - 240, CANVAS_H - 200, SPECIES[c.speciesId].name, c.level, b.playerHpShown, c.maxHp, true, c.status);
 
     // Message / menu area
-    if (s.menu && (s.menu.kind === "battleMain" || s.menu.kind === "battleFight" || s.menu.kind === "battleBag")) {
+    if (s.menu && (s.menu.kind === "battleMain" || s.menu.kind === "battleFight" || s.menu.kind === "battleBag" || s.menu.kind === "battleSwitch")) {
       renderBattleMenu(ctx, s);
     } else {
       renderBattleMessage(ctx, b);
@@ -1809,7 +2481,14 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
   }
 
-  function drawBattleHpBox(ctx: CanvasRenderingContext2D, x: number, y: number, name: string, level: number, hp: number, maxHp: number, showHpNum: boolean) {
+  function drawBattleHpBox(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number,
+    name: string, level: number,
+    hp: number, maxHp: number,
+    showHpNum: boolean,
+    status: StatusCondition = "ok"
+  ) {
     const w = 224;
     const h = showHpNum ? 64 : 48;
     ctx.fillStyle = "rgba(255,255,255,0.95)";
@@ -1832,6 +2511,28 @@ export function Game({ username, displayName, onLogout }: Props) {
     ctx.fillRect(barX + 1, barY + 1, (barW - 2) * ratio, 8);
     if (showHpNum) {
       drawText(ctx, `${Math.ceil(hp)}/${maxHp}`, x + w - 8, y + 52, "#1a1326", 12, "right");
+    }
+    // Status badge — small colored pill next to the name
+    if (status && status !== "ok" && status !== "fainted") {
+      const badge = statusBadge(status);
+      const bx = x + 8;
+      const by = y + h - 16;
+      ctx.fillStyle = badge.color;
+      ctx.fillRect(bx, by, 32, 14);
+      ctx.strokeStyle = "#1a1326";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by, 32, 14);
+      drawText(ctx, badge.label, bx + 16, by + 10, "#fff", 9, "center");
+    }
+  }
+
+  function statusBadge(status: StatusCondition): { label: string; color: string } {
+    switch (status) {
+      case "psn": return { label: "PSN", color: "#9a4ad8" };
+      case "brn": return { label: "BRN", color: "#ff6b35" };
+      case "par": return { label: "PAR", color: "#c8a020" };
+      case "slp": return { label: "SLP", color: "#7080a8" };
+      default:    return { label: "", color: "#000" };
     }
   }
 
@@ -1959,6 +2660,23 @@ export function Game({ username, displayName, onLogout }: Props) {
         if (pct >= 60) color = "#5fae5f";
         else if (pct >= 30) color = "#ffd040";
         drawText(ctx, `~${pct}% catch chance (lower HP = easier!)`, CANVAS_W - 24, boxY - 12, color, 11, "right");
+      }
+    } else if (m.kind === "battleSwitch") {
+      drawText(ctx, "Choose a Monstro to send out:", 16, boxY + 4, "#ffe066", 11, "left");
+      for (let i = 0; i < m.options.length; i++) {
+        const x = 24;
+        const y = boxY + 22 + i * 18;
+        if (i === m.selected) {
+          ctx.fillStyle = "rgba(255,224,102,0.2)";
+          ctx.fillRect(x - 6, y - 12, CANVAS_W - 48, 18);
+          drawText(ctx, ">", x - 6, y, "#ffe066", 13, "left");
+        }
+        // Grey out fainted / active
+        const party = s.save.party[i];
+        let color = "#fff";
+        if (party && party.currentHp <= 0) color = "#7a7a7a";
+        else if (party && s.battle.activeIdx === i) color = "#88c8ff";
+        drawText(ctx, m.options[i], x + 16, y, color, 12, "left");
       }
     }
   }

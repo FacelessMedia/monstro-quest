@@ -29,6 +29,15 @@ export type MapPortal = {
   toY: number;
 };
 
+export type TrainerDef = {
+  name: string;            // displayed name e.g. "Trainer Avery"
+  party: { speciesId: string; level: number }[]; // their roster
+  intro: string[];         // pre-battle taunts
+  victory: string[];       // post-loss lines (when player wins)
+  prize: number;           // coin reward on full defeat
+  flag: string;            // save flag set once defeated (prevents re-battle)
+};
+
 export type NpcDef = {
   x: number;
   y: number;
@@ -36,12 +45,12 @@ export type NpcDef = {
   dialogue: string[];
   // optional: starter giver
   givesStarter?: boolean;
-  // optional: trainer battle (future use)
-  flagAfter?: string; // sets this flag once dialogue ends
-  requiresFlag?: string; // only shown if this flag is missing (i.e. not done)
-  altDialogue?: string[]; // shown when requiresFlag is already set
-  // If present, opens the shop menu after the dialogue ends.
-  shop?: ItemId[];
+  flagAfter?: string;           // sets this flag once dialogue ends
+  requiresFlag?: string;        // only shown if this flag is missing
+  altDialogue?: string[];       // shown when requiresFlag is already set
+  shop?: ItemId[];              // opens a mart after greeting
+  trainer?: TrainerDef;         // triggers a trainer battle
+  pc?: boolean;                 // opens the PC storage UI after greeting
 };
 
 export type SignDef = { x: number; y: number; text: string[] };
@@ -152,7 +161,7 @@ const route1: GameMap = {
     "XGGGTTTTPPTTTTGGGGGX",
     "XGGGTTGGPPGGTTGGNGGX",
     "XGGGGGGGPPGGGGGGGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
+    "XGGGNGGGPPGGGGGGGGGX",
     "XXXXXXXXPPXXXXXXXXXX",
   ],
   encounters: [
@@ -179,6 +188,25 @@ const route1: GameMap = {
         "Press B during a battle to throw a Catch Capsule.",
       ],
     },
+    // === Trainer: Bug Catcher Tim ===
+    {
+      x: 4,
+      y: 12,
+      spriteKey: "trainer",
+      dialogue: ["Hey! I saw you eyeing me!", "Bug Catcher Tim challenges you!"],
+      altDialogue: ["My Buzzbee swarm needs more training..."],
+      trainer: {
+        name: "Bug Catcher Tim",
+        intro: ["Hey! I saw you eyeing me!", "Bug Catcher Tim challenges you!"],
+        victory: ["Hmph!", "My Buzzbees still have a lot to learn."],
+        prize: 240,
+        flag: "trainerTimDefeated",
+        party: [
+          { speciesId: "buzzbee", level: 5 },
+          { speciesId: "buzzbee", level: 6 },
+        ],
+      },
+    },
   ],
   signs: [],
 };
@@ -194,8 +222,8 @@ const lumencove: GameMap = {
     "XGBBBBGGPPGGBBBBGGGX",
     "XGBBBBGGPPGGBHHBGGGX",
     "XGBBDBGGPPGGBBDBGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
-    "XGGNGGGGPPGGGGGGGGGX",
+    "XGGGGGGGPPGNGGGGGGGX",
+    "XGGNGGGGPPGGGGGGGNGX",
     "XGGGGGGGPPGGGGNGGGGX",
     "XGGGWWWGPPGWWWGGGGGX",
     "XGGWWWWWPPWWWWWWGGGX",
@@ -230,7 +258,37 @@ const lumencove: GameMap = {
         "Lumencove Mart at your service!",
         "We stock advanced capsules for tougher Monstro.",
       ],
-      shop: ["capsule", "greater_capsule", "ultra_capsule", "super_potion", "revive"],
+      shop: ["capsule", "greater_capsule", "ultra_capsule", "super_potion", "revive", "repel"],
+    },
+    // === Trainer: Coastal Rival Mara — tougher fight ===
+    {
+      x: 11,
+      y: 6,
+      spriteKey: "trainer",
+      dialogue: ["A new face! Care for a battle?", "I'm Mara, and I won't go easy on you!"],
+      altDialogue: ["You really know your Monstro. Train hard!"],
+      trainer: {
+        name: "Coastal Rival Mara",
+        intro: ["A new face! Care for a battle?", "I'm Mara, and I won't go easy on you!"],
+        victory: ["Whoa — you're really good!", "Take this — and keep training!"],
+        prize: 600,
+        flag: "trainerMaraDefeated",
+        party: [
+          { speciesId: "spinifin", level: 11 },
+          { speciesId: "aquadrip", level: 13 },
+        ],
+      },
+    },
+    // === PC Attendant — opens storage box ===
+    {
+      x: 17,
+      y: 7,
+      spriteKey: "clerk",
+      dialogue: [
+        "Welcome to the Lumencove PC!",
+        "I'll connect you to your Monstro storage.",
+      ],
+      pc: true,
     },
   ],
   signs: [

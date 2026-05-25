@@ -9,9 +9,10 @@ export type ItemId =
   | "ultra_capsule"
   | "potion"
   | "super_potion"
-  | "revive";
+  | "revive"
+  | "repel";
 
-export type ItemCategory = "capture" | "heal" | "revive" | "key";
+export type ItemCategory = "capture" | "heal" | "revive" | "key" | "field";
 
 export type Item = {
   id: ItemId;
@@ -88,6 +89,15 @@ export const ITEMS: Record<ItemId, Item> = {
     sellPrice: 400,
     description: "Revives a fainted Monstro with half its max HP.",
     reviveFactor: 0.5,
+  },
+  repel: {
+    id: "repel",
+    name: "Repel",
+    short: "Repel",
+    category: "field",
+    price: 350,
+    sellPrice: 175,
+    description: "Wards off weak wild Monstro for 100 steps when used in the field.",
   },
 };
 
