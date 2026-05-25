@@ -7,7 +7,11 @@ import {
   newSave,
   saveGame,
   isGuest,
+  getBagCount,
+  addToBag,
+  removeFromBag,
 } from "../lib/save";
+import { ITEMS, ItemId } from "../lib/items";
 import {
   Creature,
   SPECIES,
@@ -51,6 +55,8 @@ import {
   TILE_DOOR,
   TILE_SIGN,
   NPC_MENTOR,
+  NPC_CLERK,
+  NPC_TRAINER,
   CATCH_BALL,
 } from "../lib/sprites";
 
@@ -72,7 +78,18 @@ type Dialogue = {
   charsShown: number;
 };
 
-type MenuKind = "pause" | "starter" | "party" | "battleMain" | "battleFight" | "battleBag" | "battleNew";
+type MenuKind =
+  | "pause"
+  | "starter"
+  | "party"
+  | "battleMain"
+  | "battleFight"
+  | "battleBag"
+  | "battleNew"
+  | "shop"
+  | "shopQty"
+  | "worldmap"
+  | "bag";
 
 type Menu = {
   kind: MenuKind;
@@ -119,6 +136,7 @@ type BattleState = {
   endedAt?: number;
   enemyHpShown: number;
   playerHpShown: number;
+  lastCapsule?: ItemId; // which capsule was last thrown — affects catch math
 };
 
 type Player = {
@@ -179,6 +197,8 @@ export function Game({ username, displayName, onLogout }: Props) {
   const [, forceRender] = useState(0);
   const [hint, setHint] = useState("Use ARROW KEYS to move · SPACE to interact · ESC for menu");
   const [savedFlash, setSavedFlash] = useState(false);
+  const [coins, setCoins] = useState(0);
+  const [lastSavedLabel, setLastSavedLabel] = useState<string>("");
 
   // Initialize state once
   useEffect(() => {
@@ -214,6 +234,8 @@ export function Game({ username, displayName, onLogout }: Props) {
     };
     stateRef.current = initial;
     centerCamera(initial);
+    setCoins(initial.save.money);
+    if (initial.save.lastSavedAt) setLastSavedLabel(formatSavedTime(initial.save.lastSavedAt));
     forceRender((n) => n + 1);
 
     // First-time greeting
@@ -295,6 +317,8 @@ export function Game({ username, displayName, onLogout }: Props) {
           const newHint = currentHint(s);
           setHint((prev) => (prev === newHint ? prev : newHint));
         }
+        // Update coin counter only when it actually changes
+        setCoins((prev) => (prev === s.save.money ? prev : s.save.money));
       }
       rafRef.current = requestAnimationFrame(loop);
     }
@@ -359,9 +383,21 @@ export function Game({ username, displayName, onLogout }: Props) {
     s.save.position = { mapId: s.save.position.mapId, x: s.player.x, y: s.player.y, facing: s.player.facing };
     saveGame(s.save);
     setSavedFlash(true);
+    setLastSavedLabel(formatSavedTime(s.save.lastSavedAt));
     setTimeout(() => setSavedFlash(false), 1500);
     if (showToast) {
       s.toast = { text: "Game Saved!", timer: 1.5 };
+    }
+  }
+
+  function formatSavedTime(t: number): string {
+    try {
+      const d = new Date(t);
+      const hh = d.getHours().toString().padStart(2, "0");
+      const mm = d.getMinutes().toString().padStart(2, "0");
+      return `${hh}:${mm}`;
+    } catch {
+      return "";
     }
   }
 
@@ -438,6 +474,24 @@ export function Game({ username, displayName, onLogout }: Props) {
       startDialogue(npc.dialogue);
       return;
     }
+    if (npc.shop) {
+      // Show greeting then open shop
+      const shopItems = npc.shop;
+      const useAlt = npc.altDialogue && npc.flagAfter && s.save.flags[npc.flagAfter];
+      startDialogue(useAlt ? npc.altDialogue! : npc.dialogue, () => {
+        const s2 = stateRef.current;
+        if (!s2) return;
+        if (npc.flagAfter) s2.save.flags[npc.flagAfter] = true;
+        s2.menu = {
+          kind: "shop",
+          options: buildShopOptions(shopItems),
+          selected: 0,
+          data: { itemIds: shopItems },
+        };
+        s2.mode = "menu";
+      });
+      return;
+    }
     if (npc.altDialogue && (npc.flagAfter ? s.save.flags[npc.flagAfter] : false)) {
       startDialogue(npc.altDialogue);
       return;
@@ -458,7 +512,7 @@ export function Game({ username, displayName, onLogout }: Props) {
   function openPauseMenu() {
     const s = stateRef.current;
     if (!s) return;
-    const opts = ["PARTY", "MONSTRODEX", "BAG", "SAVE", "QUIT"];
+    const opts = ["PARTY", "MONSTRODEX", "BAG", "MAP", "SAVE", "QUIT"];
     startMenu({ kind: "pause", options: opts, selected: 0 });
   }
 
@@ -485,6 +539,23 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.menu) return;
     const m = s.menu;
+    // Quantity selector uses ← / → and ↑ / ↓ to adjust qty
+    if (m.kind === "shopQty") {
+      const max = Math.max(1, m.data?.max ?? 1);
+      if (key === "left" || key === "down") {
+        m.selected = Math.max(1, m.selected - 1);
+      } else if (key === "right" || key === "up") {
+        m.selected = Math.min(max, m.selected + 1);
+      } else if (key === "confirm") {
+        handleMenuConfirm();
+      } else if (key === "cancel" || key === "menu") {
+        // Back to shop list
+        const shopList = (m.data?.shopList as ItemId[]) || [];
+        const returnSelected = (m.data?.returnSelected as number) ?? 0;
+        s.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
+      }
+      return;
+    }
     if (key === "up") {
       m.selected = (m.selected - 1 + m.options.length) % m.options.length;
     } else if (key === "down") {
@@ -504,9 +575,19 @@ export function Game({ username, displayName, onLogout }: Props) {
   function handleMenuCancel() {
     const s = stateRef.current;
     if (!s || !s.menu) return;
-    if (s.menu.kind === "pause") closeMenu();
-    else if (s.menu.kind === "party") closeMenu();
-    else if (s.menu.kind === "battleFight") {
+    const k = s.menu.kind;
+    if (k === "pause" || k === "party" || k === "worldmap" || k === "bag") {
+      closeMenu();
+    } else if (k === "shop") {
+      // Exit shop with goodbye
+      s.menu = undefined;
+      startDialogue(["Thank you, come again!"]);
+    } else if (k === "battleFight") {
+      if (s.battle) {
+        s.battle.phase = "menu";
+        s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+      }
+    } else if (k === "battleBag") {
       if (s.battle) {
         s.battle.phase = "menu";
         s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
@@ -545,13 +626,22 @@ export function Game({ username, displayName, onLogout }: Props) {
           startMenu({ kind: "party", options: s.save.party.map((c) => `${SPECIES[c.speciesId].name} Lv${c.level}`), selected: 0 });
         }
       } else if (choice === "BAG") {
-        // Close menu first so dialogue mode sticks
-        s.menu = undefined;
-        startDialogue([
-          `Catch Capsules: ${s.save.bag.capsules}`,
-          `Potions: ${s.save.bag.potions}`,
-          `Coins: ${s.save.money}`,
-        ]);
+        // Show full bag list with descriptions
+        const owned: ItemId[] = (Object.keys(ITEMS) as ItemId[]).filter((id) => getBagCount(s.save.bag, id) > 0);
+        if (owned.length === 0) {
+          s.menu = undefined;
+          startDialogue([
+            "Your bag is empty.",
+            `You have ${s.save.money} coins. Try the Mart!`,
+          ]);
+        } else {
+          const labels = owned.map((id) => `${ITEMS[id].name} x${getBagCount(s.save.bag, id)}`);
+          startMenu({ kind: "bag", options: [...labels, "Close"], selected: 0, data: { itemIds: owned } });
+        }
+      } else if (choice === "MAP") {
+        // World map overlay
+        const mapIds = Object.keys(MAPS);
+        startMenu({ kind: "worldmap", options: mapIds, selected: mapIds.indexOf(s.save.position.mapId), data: { mapIds } });
       } else if (choice === "MONSTRODEX") {
         const total = Object.keys(SPECIES).length;
         const seen = s.save.monstroSeen.length;
@@ -603,34 +693,122 @@ export function Game({ username, displayName, onLogout }: Props) {
       s.menu = undefined;
       doPlayerAttack(m.selected);
     } else if (m.kind === "battleBag") {
-      if (m.selected === 0) {
-        // Catch Capsule
-        if (s.save.bag.capsules <= 0) {
-          battleMessage("No Catch Capsules left!", "bagMenu");
-          return;
-        }
-        s.menu = undefined;
-        throwCapsule();
-      } else if (m.selected === 1) {
-        // Potion
-        if (s.save.bag.potions <= 0) {
-          battleMessage("No Potions left!", "bagMenu");
-          return;
-        }
-        const c = s.save.party[s.battle!.activeIdx];
-        if (c.currentHp >= c.maxHp) {
-          battleMessage("HP is already full!", "bagMenu");
-          return;
-        }
-        s.save.bag.potions -= 1;
-        const heal = 30;
-        c.currentHp = Math.min(c.maxHp, c.currentHp + heal);
-        s.menu = undefined;
-        battleMessage(`${SPECIES[c.speciesId].name} recovered ${heal} HP!`, "enemyAttack");
-      } else if (m.selected === 2) {
-        // Cancel
+      const itemIds = (m.data?.itemIds as ItemId[]) || [];
+      const itemId = itemIds[m.selected];
+      // Last entry is always "Cancel"
+      if (!itemId) {
         s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+        return;
       }
+      useItemInBattle(itemId);
+    } else if (m.kind === "bag") {
+      // Out-of-battle bag screen: items + Close
+      const itemIds = (m.data?.itemIds as ItemId[]) || [];
+      const itemId = itemIds[m.selected];
+      if (!itemId) {
+        closeMenu();
+        return;
+      }
+      // Tapping an item just shows its description (out of battle)
+      const it = ITEMS[itemId];
+      const qty = getBagCount(s.save.bag, itemId);
+      s.menu = undefined;
+      startDialogue([
+        `${it.name} (x${qty})`,
+        it.description,
+      ]);
+    } else if (m.kind === "shop") {
+      // First option is always "Leave"
+      const itemIds = (m.data?.itemIds as ItemId[]) || [];
+      if (m.selected >= itemIds.length) {
+        s.menu = undefined;
+        startDialogue(["Thank you, come again!"]);
+        return;
+      }
+      const itemId = itemIds[m.selected];
+      const it = ITEMS[itemId];
+      // Open qty selector
+      s.menu = {
+        kind: "shopQty",
+        options: [],
+        selected: 1,
+        data: { itemId, shopList: itemIds, returnSelected: m.selected, max: Math.min(99, Math.floor(s.save.money / it.price)) },
+      };
+    } else if (m.kind === "shopQty") {
+      const itemId = m.data?.itemId as ItemId | undefined;
+      const shopList = (m.data?.shopList as ItemId[]) || [];
+      const returnSelected = (m.data?.returnSelected as number) ?? 0;
+      const qty = Math.max(1, m.selected);
+      if (!itemId) {
+        s.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
+        return;
+      }
+      const it = ITEMS[itemId];
+      const total = it.price * qty;
+      if (s.save.money < total) {
+        s.menu = undefined;
+        startDialogue(["You don't have enough coins for that."], () => {
+          // Go back to the shop list
+          const s2 = stateRef.current;
+          if (!s2) return;
+          s2.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
+          s2.mode = "menu";
+        });
+        return;
+      }
+      s.save.money -= total;
+      addToBag(s.save.bag, itemId, qty);
+      // Return to shop with confirmation dialogue
+      s.menu = undefined;
+      startDialogue([
+        `Purchased ${it.name} x${qty} for ${total} coins.`,
+        `Anything else?`,
+      ], () => {
+        const s2 = stateRef.current;
+        if (!s2) return;
+        s2.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
+        s2.mode = "menu";
+      });
+    }
+  }
+
+  // Build the labelled option list for a shop, including the trailing "Leave".
+  function buildShopOptions(items: ItemId[]): string[] {
+    return [...items.map((id) => `${ITEMS[id].name} — ${ITEMS[id].price}c`), "Leave"];
+  }
+
+  // Use an item from the battle bag.
+  function useItemInBattle(itemId: ItemId) {
+    const s = stateRef.current;
+    if (!s || !s.battle) return;
+    const have = getBagCount(s.save.bag, itemId);
+    const it = ITEMS[itemId];
+    if (have <= 0) {
+      battleMessage(`No ${it.name} left!`, "bagMenu");
+      return;
+    }
+    if (it.category === "capture") {
+      s.menu = undefined;
+      throwCapsule(itemId);
+      return;
+    }
+    if (it.category === "heal") {
+      const c = s.save.party[s.battle.activeIdx];
+      if (c.currentHp >= c.maxHp) {
+        battleMessage("HP is already full!", "bagMenu");
+        return;
+      }
+      removeFromBag(s.save.bag, itemId, 1);
+      const heal = it.healAmount ?? 30;
+      c.currentHp = Math.min(c.maxHp, c.currentHp + heal);
+      s.menu = undefined;
+      battleMessage(`${SPECIES[c.speciesId].name} recovered ${heal} HP!`, "enemyAttack");
+      return;
+    }
+    if (it.category === "revive") {
+      // Revives are not usable in single-Monstro battles yet
+      battleMessage("Can't use that here.", "bagMenu");
+      return;
     }
   }
 
@@ -649,14 +827,14 @@ export function Game({ username, displayName, onLogout }: Props) {
   function openBattleBag() {
     const s = stateRef.current;
     if (!s || !s.battle) return;
+    // Show every item the player owns, in stable order
+    const owned: ItemId[] = (Object.keys(ITEMS) as ItemId[]).filter((id) => getBagCount(s.save.bag, id) > 0);
+    const labels = owned.map((id) => `${ITEMS[id].name} x${getBagCount(s.save.bag, id)}`);
     s.menu = {
       kind: "battleBag",
-      options: [
-        `Catch Capsule x${s.save.bag.capsules}`,
-        `Potion x${s.save.bag.potions}`,
-        `Cancel`,
-      ],
+      options: [...labels, "Cancel"],
       selected: 0,
+      data: { itemIds: owned },
     };
     s.battle.phase = "bagMenu";
   }
@@ -828,9 +1006,13 @@ export function Game({ username, displayName, onLogout }: Props) {
     const enemySpecies = SPECIES[b.enemy.speciesId];
     const xp = expYield(enemySpecies, b.enemy.level);
     const result = gainExp(c, xp);
+    // Coin reward — scales with enemy level (10c/level, ±20%)
+    const coinReward = Math.max(5, Math.round(b.enemy.level * 10 * (0.9 + Math.random() * 0.2)));
+    s.save.money += coinReward;
     const msgs: { text: string; next?: BattlePhase; action?: () => void }[] = [
-      { text: `Wild ${enemySpecies.name} fainted!` , next: "victory" },
+      { text: `Wild ${enemySpecies.name} fainted!`, next: "victory" },
       { text: `${SPECIES[c.speciesId].name} gained ${xp} EXP!` },
+      { text: `You found ${coinReward} coins!` },
     ];
     if (result.leveledUp) {
       msgs.push({ text: `${SPECIES[c.speciesId].name} grew to Lv${c.level}!` });
@@ -896,20 +1078,22 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
   }
 
-  function throwCapsule() {
+  function throwCapsule(itemId: ItemId = "capsule") {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
-    s.save.bag.capsules -= 1;
+    removeFromBag(s.save.bag, itemId, 1);
     b.ballAnim = 0;
-    battleMessage(`${displayName} threw a Catch Capsule!`, "throwBall");
+    b.lastCapsule = itemId;
+    battleMessage(`${displayName} threw a ${ITEMS[itemId].name}!`, "throwBall");
   }
 
   function resolveCatch() {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
-    const caught = tryCatch(b.enemy);
+    const mult = ITEMS[b.lastCapsule ?? "capsule"].catchMultiplier ?? 1;
+    const caught = tryCatch(b.enemy, mult);
     b.ballOutcome = caught ? "caught" : "broke";
     b.phase = "checkCatch";
     if (caught) {
@@ -986,6 +1170,10 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
     if (s.mode === "menu") {
       if (s.menu?.kind === "starter") return "Arrows · Browse · SPACE · Choose";
+      if (s.menu?.kind === "shop") return "↑ ↓ Browse · SPACE Buy · ESC Leave";
+      if (s.menu?.kind === "shopQty") return "← → Change qty · SPACE Confirm · ESC Back";
+      if (s.menu?.kind === "worldmap") return "↑ ↓ Browse regions · ESC Close";
+      if (s.menu?.kind === "bag") return "↑ ↓ Browse · SPACE Inspect · ESC Close";
       return "Arrows · Navigate · SPACE · Select · ESC · Close";
     }
     return "Arrows/WASD · Move · SPACE · Talk · ESC · Menu · SHIFT · Run";
@@ -1206,7 +1394,11 @@ export function Game({ username, displayName, onLogout }: Props) {
       const px = npc.x * TILE_SIZE - camX;
       const py = npc.y * TILE_SIZE - camY;
       if (px < -TILE_SIZE || px > CANVAS_W || py < -TILE_SIZE || py > CANVAS_H) continue;
-      drawSprite(ctx, NPC_MENTOR, px, py, PIXEL_SCALE);
+      const npcSprite =
+        npc.spriteKey === "clerk" ? NPC_CLERK :
+        npc.spriteKey === "trainer" ? NPC_TRAINER :
+        NPC_MENTOR;
+      drawSprite(ctx, npcSprite, px, py, PIXEL_SCALE);
     }
 
     // Draw player
@@ -1318,6 +1510,10 @@ export function Game({ username, displayName, onLogout }: Props) {
         }
         drawText(ctx, m.options[i], x + 28, oy + 18, "#fff", 13, "left");
       }
+      // Pause menu coin counter
+      if (m.kind === "pause") {
+        drawText(ctx, `${s.save.money} coins`, x + w / 2, y + h + 18, "#ffd040", 12, "center");
+      }
       // For starter selection, show preview sprite
       if (m.kind === "starter") {
         const spId = STARTERS[m.selected];
@@ -1337,6 +1533,204 @@ export function Game({ username, displayName, onLogout }: Props) {
           drawText(ctx, ln, 112, dy, "#b8b8d4", 11, "center");
           dy += 12;
         }
+      }
+    } else if (m.kind === "shop") {
+      renderShopMenu(ctx, s, m);
+    } else if (m.kind === "shopQty") {
+      renderShopQty(ctx, s, m);
+    } else if (m.kind === "worldmap") {
+      renderWorldMap(ctx, s, m);
+    } else if (m.kind === "bag") {
+      renderBagMenu(ctx, s, m);
+    }
+  }
+
+  // Dim background so menus pop on top of the overworld
+  function dimBackground(ctx: CanvasRenderingContext2D, alpha: number = 0.55) {
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  }
+
+  function renderShopMenu(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.55);
+    const w = 460;
+    const h = 280;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 12;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawText(ctx, "MART", x + w / 2, y + 22, "#ffe066", 16, "center");
+    drawText(ctx, `${s.save.money} coins`, x + w - 12, y + 22, "#ffd040", 12, "right");
+
+    // List
+    const itemIds = (m.data?.itemIds as ItemId[]) || [];
+    const labels = m.options;
+    const listX = x + 12;
+    const listY = y + 44;
+    const rowH = 22;
+    for (let i = 0; i < labels.length; i++) {
+      const oy = listY + i * rowH;
+      if (i === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.15)";
+        ctx.fillRect(listX, oy - 4, w - 24, rowH);
+        drawText(ctx, ">", listX + 4, oy + 10, "#ffe066", 13, "left");
+      }
+      const isLeave = i >= itemIds.length;
+      const label = labels[i];
+      drawText(ctx, isLeave ? "Leave" : label, listX + 22, oy + 10, isLeave ? "#b8b8d4" : "#fff", 12, "left");
+      if (!isLeave) {
+        const id = itemIds[i];
+        const owned = getBagCount(s.save.bag, id);
+        drawText(ctx, `Owned: ${owned}`, x + w - 12, oy + 10, "#88f0c4", 11, "right");
+      }
+    }
+    // Description panel for the highlighted item
+    const descY = y + h - 64;
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(x + 8, descY, w - 16, 56);
+    ctx.strokeStyle = "rgba(255,224,102,0.4)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 8, descY, w - 16, 56);
+    if (m.selected < itemIds.length) {
+      const it = ITEMS[itemIds[m.selected]];
+      drawText(ctx, it.name, x + 16, descY + 16, "#ffe066", 12, "left");
+      drawText(ctx, `${it.price} coins`, x + w - 16, descY + 16, "#ffd040", 11, "right");
+      const lines = wrapText(ctx, it.description, w - 32, "11px monospace");
+      let dy = descY + 32;
+      for (const ln of lines.slice(0, 2)) {
+        drawText(ctx, ln, x + 16, dy, "#cfcfdc", 11, "left");
+        dy += 13;
+      }
+    } else {
+      drawText(ctx, "Leave the shop.", x + 16, descY + 28, "#b8b8d4", 11, "left");
+    }
+  }
+
+  function renderShopQty(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.65);
+    const itemId = m.data?.itemId as ItemId | undefined;
+    if (!itemId) return;
+    const it = ITEMS[itemId];
+    const qty = Math.max(1, m.selected);
+    const total = it.price * qty;
+    const max = Math.max(1, m.data?.max ?? 1);
+
+    const w = 360;
+    const h = 180;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+
+    drawText(ctx, `Buy ${it.name}`, x + w / 2, y + 28, "#ffe066", 16, "center");
+    drawText(ctx, `${it.price} coins each`, x + w / 2, y + 50, "#ffd040", 12, "center");
+
+    // Qty stepper
+    drawText(ctx, `◄  x${qty}  ►`, x + w / 2, y + 92, "#fff", 22, "center");
+    drawText(ctx, `Total: ${total} coins`, x + w / 2, y + 122, total > s.save.money ? "#ff6b6b" : "#5fae5f", 13, "center");
+    drawText(ctx, `(max ${max})`, x + w / 2, y + 142, "#b8b8d4", 10, "center");
+    drawText(ctx, `SPACE: Buy   ESC: Back`, x + w / 2, y + 162, "#b8b8d4", 10, "center");
+  }
+
+  function renderWorldMap(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.7);
+    const w = 520;
+    const h = 360;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2;
+    ctx.fillStyle = "rgba(15,30,15,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawText(ctx, "WORLD MAP — VERDANT REGION", x + w / 2, y + 24, "#ffe066", 14, "center");
+
+    // Render the three regions as stacked boxes (north -> south)
+    // hearthwick (top), route1 (middle), lumencove (bottom)
+    const mapIds = (m.data?.mapIds as string[]) || [];
+    const boxW = 220;
+    const boxH = 56;
+    const cx = x + w / 2;
+    const startY = y + 60;
+    const gap = 24;
+    const order = ["hearthwick", "route1", "lumencove"];
+    // Connecting path
+    ctx.strokeStyle = "#6a4f2a";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, startY + boxH);
+    ctx.lineTo(cx, startY + 3 * boxH + 2 * gap);
+    ctx.stroke();
+    for (let i = 0; i < order.length; i++) {
+      const id = order[i];
+      const map = MAPS[id];
+      if (!map) continue;
+      const bx = cx - boxW / 2;
+      const by = startY + i * (boxH + gap);
+      const isCurrent = id === s.save.position.mapId;
+      const isSelected = mapIds[m.selected] === id;
+      ctx.fillStyle = isCurrent ? "#2c5a2c" : "#1f3a20";
+      ctx.fillRect(bx, by, boxW, boxH);
+      ctx.strokeStyle = isSelected ? "#ffe066" : isCurrent ? "#9fe0a0" : "#5a7a5a";
+      ctx.lineWidth = isSelected ? 3 : 2;
+      ctx.strokeRect(bx, by, boxW, boxH);
+      drawText(ctx, map.name, bx + boxW / 2, by + 22, "#fff", 13, "center");
+      drawText(ctx, isCurrent ? "● You are here" : "○", bx + boxW / 2, by + 44, isCurrent ? "#ffe066" : "#88a888", 11, "center");
+    }
+    // Hint
+    drawText(ctx, "↑ ↓ to browse  ·  ESC to close", x + w / 2, y + h - 18, "#b8b8d4", 11, "center");
+  }
+
+  function renderBagMenu(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.55);
+    const w = 460;
+    const h = 300;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 8;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawText(ctx, "BAG", x + w / 2, y + 22, "#ffe066", 16, "center");
+    drawText(ctx, `${s.save.money} coins`, x + w - 12, y + 22, "#ffd040", 12, "right");
+
+    const itemIds = (m.data?.itemIds as ItemId[]) || [];
+    const labels = m.options;
+    const listX = x + 12;
+    const listY = y + 44;
+    const rowH = 22;
+    for (let i = 0; i < labels.length; i++) {
+      const oy = listY + i * rowH;
+      if (i === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.15)";
+        ctx.fillRect(listX, oy - 4, w - 24, rowH);
+        drawText(ctx, ">", listX + 4, oy + 10, "#ffe066", 13, "left");
+      }
+      const isClose = i >= itemIds.length;
+      drawText(ctx, isClose ? "Close" : labels[i], listX + 22, oy + 10, isClose ? "#b8b8d4" : "#fff", 12, "left");
+    }
+    // Description for highlighted item
+    const descY = y + h - 64;
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(x + 8, descY, w - 16, 56);
+    ctx.strokeStyle = "rgba(255,224,102,0.4)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 8, descY, w - 16, 56);
+    if (m.selected < itemIds.length) {
+      const it = ITEMS[itemIds[m.selected]];
+      drawText(ctx, it.name, x + 16, descY + 16, "#ffe066", 12, "left");
+      const lines = wrapText(ctx, it.description, w - 32, "11px monospace");
+      let dy = descY + 32;
+      for (const ln of lines.slice(0, 2)) {
+        drawText(ctx, ln, x + 16, dy, "#cfcfdc", 11, "left");
+        dy += 13;
       }
     }
   }
@@ -1623,8 +2017,11 @@ export function Game({ username, displayName, onLogout }: Props) {
         <span className="toolbar-btn" style={{ cursor: "default" }}>
           {displayName}{isGuest(username) ? " (Guest)" : ""}
         </span>
+        <span className="toolbar-btn" style={{ cursor: "default", color: "#ffd040" }} title="Spend at Marts to buy items">
+          ⛁ {coins}
+        </span>
         <button className="toolbar-btn" onClick={() => doSave(true)} title="Save game (or press ESC > SAVE)">
-          {savedFlash ? "✓ Saved" : "Save"}
+          {savedFlash ? "✓ Saved" : (lastSavedLabel ? `Save (${lastSavedLabel})` : "Save")}
         </button>
         <button className="toolbar-btn" onClick={handleLogout} title="Save and return to title">Logout</button>
       </div>

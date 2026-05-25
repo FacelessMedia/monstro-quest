@@ -1,3 +1,5 @@
+import type { ItemId } from "./items";
+
 // Tilemap & world definitions.
 // Tile codes:
 //  G = grass (walkable)
@@ -30,15 +32,16 @@ export type MapPortal = {
 export type NpcDef = {
   x: number;
   y: number;
-  spriteKey: "mentor";
+  spriteKey: "mentor" | "clerk" | "trainer";
   dialogue: string[];
   // optional: starter giver
   givesStarter?: boolean;
-  // optional: trainer battle
-  // trainer?: { creatures: { speciesId: string; level: number }[]; intro: string; victory: string };
+  // optional: trainer battle (future use)
   flagAfter?: string; // sets this flag once dialogue ends
   requiresFlag?: string; // only shown if this flag is missing (i.e. not done)
   altDialogue?: string[]; // shown when requiresFlag is already set
+  // If present, opens the shop menu after the dialogue ends.
+  shop?: ItemId[];
 };
 
 export type SignDef = { x: number; y: number; text: string[] };
@@ -67,10 +70,10 @@ const hearthwick: GameMap = {
     "XGGGGGGGGGGGGGGGGGGX",
     "XGGGGGGPPPPGGGGGGGGX",
     "XGGGGGGGPPGGGNGGGGGX",
+    "XGGNGGGGPPGGGGGGGGGX",
     "XGGGGGGGPPGGGGGGGGGX",
     "XGGGGGGGPPGGGGGGGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
+    "XGGGGGGGPPGGGGGIGGGX",
     "XGGGGGGGPPGGGGGGGGGX",
     "XGGGGGGGPPGGGGGGGGGX",
     "XXXXXXXXPPXXXXXXXXXX",
@@ -81,6 +84,7 @@ const hearthwick: GameMap = {
     { x: 9, y: 14, toMap: "route1", toX: 9, toY: 1 },
   ],
   npcs: [
+    // Professor Cedar — gives the starter
     {
       x: 13,
       y: 7,
@@ -98,6 +102,17 @@ const hearthwick: GameMap = {
       ],
       flagAfter: "hasStarter",
     },
+    // Hearthwick Mart clerk — standing outside the left building
+    {
+      x: 3,
+      y: 8,
+      spriteKey: "clerk",
+      dialogue: [
+        "Welcome to Hearthwick Mart!",
+        "Stock up on capsules and potions before you head out.",
+      ],
+      shop: ["capsule", "greater_capsule", "potion", "super_potion", "revive"],
+    },
   ],
   signs: [
     {
@@ -106,6 +121,14 @@ const hearthwick: GameMap = {
       text: [
         "HEARTHWICK TOWN",
         "Where every great journey begins.",
+      ],
+    },
+    {
+      x: 15,
+      y: 11,
+      text: [
+        "TIP: Press ESC to open the menu.",
+        "From there you can SAVE, view your PARTY, BAG, or the WORLD MAP.",
       ],
     },
   ],
@@ -167,12 +190,12 @@ const lumencove: GameMap = {
   tiles: [
     "XXXXXXXXPPXXXXXXXXXX",
     "XGGGGGGGPPGGGGGGGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
+    "XGGGGGGGPPIGGGGGGGGX",
     "XGBBBBGGPPGGBBBBGGGX",
     "XGBBBBGGPPGGBHHBGGGX",
     "XGBBDBGGPPGGBBDBGGGX",
     "XGGGGGGGPPGGGGGGGGGX",
-    "XGGGGGGGPPGGGGGGGGGX",
+    "XGGNGGGGPPGGGGGGGGGX",
     "XGGGGGGGPPGGGGNGGGGX",
     "XGGGWWWGPPGWWWGGGGGX",
     "XGGWWWWWPPWWWWWWGGGX",
@@ -187,6 +210,7 @@ const lumencove: GameMap = {
     { x: 9, y: 0, toMap: "route1", toX: 9, toY: 13 },
   ],
   npcs: [
+    // Healer info NPC near the pink building
     {
       x: 14,
       y: 8,
@@ -197,8 +221,28 @@ const lumencove: GameMap = {
         "Step on the glowing pad to restore your team.",
       ],
     },
+    // Lumencove Mart clerk (sells higher-tier gear)
+    {
+      x: 3,
+      y: 7,
+      spriteKey: "clerk",
+      dialogue: [
+        "Lumencove Mart at your service!",
+        "We stock advanced capsules for tougher Monstro.",
+      ],
+      shop: ["capsule", "greater_capsule", "ultra_capsule", "super_potion", "revive"],
+    },
   ],
-  signs: [],
+  signs: [
+    {
+      x: 10,
+      y: 2,
+      text: [
+        "LUMENCOVE TOWN",
+        "A coastal village known for its healing waters.",
+      ],
+    },
+  ],
 };
 
 export const MAPS: Record<string, GameMap> = {

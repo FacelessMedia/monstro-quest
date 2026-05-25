@@ -78,6 +78,17 @@ canvas {
   box-shadow: 0 8px 24px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.05);
 }
 
+.title-carousel {
+  display: block;
+  margin: 4px auto 16px;
+  image-rendering: pixelated;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle at 50% 50%, rgba(91, 74, 138, 0.35) 0%, rgba(20, 20, 40, 0) 70%);
+  border-radius: 50%;
+  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.5));
+}
+
 .form-card h2 {
   font-size: 18px;
   margin-bottom: 16px;

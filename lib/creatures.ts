@@ -337,12 +337,12 @@ export function gainExp(creature: Creature, amount: number): { leveledUp: boolea
   return { leveledUp: false, newMoves };
 }
 
-export function tryCatch(target: Creature): boolean {
+export function tryCatch(target: Creature, ballMultiplier: number = 1): boolean {
   const sp = SPECIES[target.speciesId];
   const hpFactor = (3 * target.maxHp - 2 * target.currentHp) / (3 * target.maxHp);
   const rate = sp.catchRate;
-  // Simple formula
-  const chance = (hpFactor * rate) / 255;
+  // Simple formula: stronger balls multiply catch chance
+  const chance = Math.min(1, (hpFactor * rate * ballMultiplier) / 255);
   return Math.random() < chance;
 }
 

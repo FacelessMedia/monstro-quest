@@ -1,11 +1,20 @@
 import { Creature } from "./creatures";
+import { ItemId } from "./items";
+
+// Bag is keyed by ItemId; legacy `capsules` and `potions` kept for backward-
+// compatibility with v1 saves. Always read via `getBagCount` / `addToBag`.
+export type Bag = {
+  capsules?: number;       // legacy
+  potions?: number;        // legacy
+  items?: Partial<Record<ItemId, number>>;
+};
 
 export type GameSave = {
   version: number;
   username: string;
   party: Creature[];
   storage: Creature[]; // overflow box
-  bag: { capsules: number; potions: number };
+  bag: Bag;
   money: number;
   position: { mapId: string; x: number; y: number; facing: "up" | "down" | "left" | "right" };
   flags: Record<string, boolean>;
@@ -14,6 +23,39 @@ export type GameSave = {
   playTimeSec: number;
   lastSavedAt: number;
 };
+
+// ===== Bag helpers (centralised so the rest of the codebase never touches
+// the legacy `capsules`/`potions` fields directly) =====
+export function getBagCount(bag: Bag, id: ItemId): number {
+  if (!bag.items) bag.items = {};
+  let n = bag.items[id] ?? 0;
+  // Migrate legacy fields on demand
+  if (id === "capsule" && typeof bag.capsules === "number" && bag.capsules > 0) {
+    n += bag.capsules;
+    bag.items[id] = n;
+    bag.capsules = 0;
+  }
+  if (id === "potion" && typeof bag.potions === "number" && bag.potions > 0) {
+    n += bag.potions;
+    bag.items[id] = n;
+    bag.potions = 0;
+  }
+  return n;
+}
+
+export function addToBag(bag: Bag, id: ItemId, qty: number = 1) {
+  if (!bag.items) bag.items = {};
+  bag.items[id] = (bag.items[id] ?? 0) + qty;
+  if (bag.items[id]! < 0) bag.items[id] = 0;
+}
+
+export function removeFromBag(bag: Bag, id: ItemId, qty: number = 1): boolean {
+  const have = getBagCount(bag, id);
+  if (have < qty) return false;
+  if (!bag.items) bag.items = {};
+  bag.items[id] = have - qty;
+  return true;
+}
 
 const ACCOUNTS_KEY = "monstroquest:accounts";
 const SAVE_KEY_PREFIX = "monstroquest:save:";
@@ -119,7 +161,7 @@ export function newSave(username: string): GameSave {
     username,
     party: [],
     storage: [],
-    bag: { capsules: 5, potions: 3 },
+    bag: { items: { capsule: 5, potion: 3 } },
     money: 500,
     position: { mapId: "hearthwick", x: 9, y: 8, facing: "down" },
     flags: {},

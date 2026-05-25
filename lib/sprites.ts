@@ -877,5 +877,77 @@ export const NPC_MENTOR: Sprite = {
   ],
 };
 
+// Mart clerk — short black hair, green apron, blue shirt
+const clerkPalette: Record<string, string> = {
+  "0": BLK,
+  "1": SKIN,
+  "2": SKIN_D,
+  "3": "#2c2c2c",      // hair
+  "4": "#1f1f1f",      // hair shadow
+  "5": "#4fb45c",      // apron green
+  "6": "#2d7a36",      // apron dark
+  "7": BOOT,
+  "8": "#3a78d6",      // shirt blue
+  "9": "#205aaa",      // shirt shadow
+  a: WHT,              // apron strap highlight
+};
+export const NPC_CLERK: Sprite = {
+  palette: clerkPalette,
+  rows: [
+    "....00000000....",
+    "...033333333330.",
+    "..03333333333330",
+    "..03311111111330",
+    "...01111111120..",
+    "...01b111b1120..",
+    "...01111111120..",
+    "....01122110....",
+    "...08888888880..",
+    "..088aaaaaa8880.",
+    ".0888555555588.0",
+    ".0885555555558.0",
+    ".0866666666658.0",
+    "..066666666660..",
+    "...066000066....",
+    "...077..00077...",
+  ],
+};
+
+// Trainer — youthful, red cap, blue jacket. Place-holder for future trainer battles.
+const trainerPalette: Record<string, string> = {
+  "0": BLK,
+  "1": SKIN,
+  "2": SKIN_D,
+  "3": SHIRT,       // red cap
+  "4": SHIRT_D,
+  "5": "#1a78d4",   // jacket
+  "6": "#0e4f8e",   // jacket dark
+  "7": BOOT,
+  "8": "#e8e8e8",   // cap underside
+  "9": "#888",
+  b: BLK,
+};
+export const NPC_TRAINER: Sprite = {
+  palette: trainerPalette,
+  rows: [
+    "....03333330....",
+    "...0333333330...",
+    "..033888888330..",
+    "..0331111133330.",
+    "...01111111120..",
+    "...01b111b1120..",
+    "...01111111120..",
+    "....01122110....",
+    "...05555555550..",
+    "..055555555550..",
+    ".055566655555.0.",
+    ".05566666655550.",
+    ".0566666666650..",
+    "..066666666660..",
+    "...066000066....",
+    "...077..00077...",
+  ],
+};
+
 // Catch ball icon for UI (small)
 export const ICON_BALL: Sprite = CATCH_BALL;

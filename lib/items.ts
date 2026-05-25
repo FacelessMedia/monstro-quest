@@ -1,0 +1,106 @@
+// ============================================================================
+// Items registry — describes every item the player can hold, buy, or use.
+// Bag inventory is stored on save.bag as a count keyed by ItemId.
+// ============================================================================
+
+export type ItemId =
+  | "capsule"
+  | "greater_capsule"
+  | "ultra_capsule"
+  | "potion"
+  | "super_potion"
+  | "revive";
+
+export type ItemCategory = "capture" | "heal" | "revive" | "key";
+
+export type Item = {
+  id: ItemId;
+  name: string;
+  short: string;       // short label used in compact lists
+  category: ItemCategory;
+  price: number;       // purchase price in coins (0 = unsellable / not for sale)
+  sellPrice: number;   // sell-back price
+  description: string; // shown in shop / bag
+  // Effects (used by Game logic):
+  catchMultiplier?: number; // for capture items, multiplies catch chance
+  healAmount?: number;      // for heal items, HP restored
+  reviveFactor?: number;    // for revive items, fraction of maxHp restored
+  battleUseOnly?: boolean;
+};
+
+export const ITEMS: Record<ItemId, Item> = {
+  capsule: {
+    id: "capsule",
+    name: "Catch Capsule",
+    short: "Capsule",
+    category: "capture",
+    price: 200,
+    sellPrice: 100,
+    description: "A starter capture sphere. Toss it at a weakened wild Monstro to attempt a catch.",
+    catchMultiplier: 1,
+  },
+  greater_capsule: {
+    id: "greater_capsule",
+    name: "Greater Capsule",
+    short: "Greater Cap",
+    category: "capture",
+    price: 600,
+    sellPrice: 300,
+    description: "An improved sphere. Catches 1.5× more reliably than a Catch Capsule.",
+    catchMultiplier: 1.5,
+  },
+  ultra_capsule: {
+    id: "ultra_capsule",
+    name: "Ultra Capsule",
+    short: "Ultra Cap",
+    category: "capture",
+    price: 1200,
+    sellPrice: 600,
+    description: "Top-tier sphere. Doubles the catch rate. Use on tough rare Monstro.",
+    catchMultiplier: 2,
+  },
+  potion: {
+    id: "potion",
+    name: "Potion",
+    short: "Potion",
+    category: "heal",
+    price: 150,
+    sellPrice: 75,
+    description: "Restores 30 HP to a single Monstro.",
+    healAmount: 30,
+  },
+  super_potion: {
+    id: "super_potion",
+    name: "Super Potion",
+    short: "Super Pot",
+    category: "heal",
+    price: 400,
+    sellPrice: 200,
+    description: "Restores 80 HP to a single Monstro.",
+    healAmount: 80,
+  },
+  revive: {
+    id: "revive",
+    name: "Revive",
+    short: "Revive",
+    category: "revive",
+    price: 800,
+    sellPrice: 400,
+    description: "Revives a fainted Monstro with half its max HP.",
+    reviveFactor: 0.5,
+  },
+};
+
+export const ALL_ITEM_IDS: ItemId[] = Object.keys(ITEMS) as ItemId[];
+
+export function itemPrice(id: ItemId): number {
+  return ITEMS[id].price;
+}
+
+export function itemSellPrice(id: ItemId): number {
+  return ITEMS[id].sellPrice;
+}
+
+export function isCapture(id: ItemId): boolean {
+  return ITEMS[id].category === "capture";
+}
