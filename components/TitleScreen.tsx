@@ -23,7 +23,8 @@ export function TitleScreen({ onLogin }: Props) {
     const ctx = cvs.getContext("2d");
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-    const speciesList = Object.values(SPECIES);
+    const speciesList = Object.values(SPECIES).filter((sp: any) => sp && sp.sprite);
+    if (speciesList.length === 0) return; // nothing to render
     let raf = 0;
     let t0 = performance.now();
     const tick = (t: number) => {
@@ -41,10 +42,14 @@ export function TitleScreen({ onLogin }: Props) {
       // Each species shown for ~2.5s with a smooth fade
       const cycle = 2.5;
       const phase = elapsed / cycle;
-      const idx = Math.floor(phase) % speciesList.length;
+      const idx = ((Math.floor(phase) % speciesList.length) + speciesList.length) % speciesList.length;
       const sub = phase - Math.floor(phase); // 0..1 within slot
       const alpha = sub < 0.15 ? sub / 0.15 : sub > 0.85 ? (1 - sub) / 0.15 : 1;
       const sp = speciesList[idx];
+      if (!sp || !sp.sprite) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       const bob = Math.sin(elapsed * 3) * 4;
       const scale = 4;
       const spriteW = 32 * scale; // sprite is 32px wide max
@@ -60,7 +65,8 @@ export function TitleScreen({ onLogin }: Props) {
       ctx.fillText(sp.name, W / 2, H - 28);
       ctx.font = `bold 11px "Courier New", monospace`;
       ctx.fillStyle = sp.color;
-      ctx.fillText(sp.types.join(" / ").toUpperCase(), W / 2, H - 12);
+      const types = Array.isArray(sp.types) ? sp.types.join(" / ").toUpperCase() : "";
+      ctx.fillText(types, W / 2, H - 12);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
