@@ -33,6 +33,9 @@ import {
   clearVolatile,
   fullyHeal,
   evolveCheck,
+  chooseBestMove,
+  effectiveStat,
+  type Move,
 } from "../lib/creatures";
 import {
   MAPS,
@@ -45,6 +48,9 @@ import {
   findSign,
   rollEncounter,
   NpcDef,
+  findFieldItem,
+  trainerLineOfSight,
+  BLOCKED_TILES,
 } from "../lib/world";
 import {
   Sprite,
@@ -59,14 +65,22 @@ import {
   TILE_TALL_GRASS,
   TILE_TREE,
   TILE_WATER,
+  TILE_WATER_B,
   TILE_SAND,
   TILE_PATH,
   TILE_BUILDING,
   TILE_DOOR,
   TILE_SIGN,
+  TILE_CUT_TREE,
+  TILE_FIELD_ITEM,
   NPC_MENTOR,
   NPC_CLERK,
   NPC_TRAINER,
+  NPC_PICNICKER,
+  NPC_FISHER,
+  NPC_GYM_LEADER,
+  EXCLAIM,
+  ICON_STONE_BADGE,
   CATCH_BALL,
 } from "../lib/sprites";
 
@@ -103,7 +117,10 @@ type MenuKind =
   | "bag"
   | "dex"
   | "dex_detail"
-  | "pc";
+  | "pc"
+  | "moveLearn"   // prompt to forget which move when learning a 5th
+  | "yesno"       // generic confirm/cancel prompt (used for Cut, Escape Rope, etc)
+  | "partyTarget"; // pick a party member to use a status/PP item on
 
 type Menu = {
   kind: MenuKind;
@@ -154,6 +171,12 @@ type BattleState = {
   enemyHpShown: number;
   playerHpShown: number;
   lastCapsule?: ItemId; // which capsule was last thrown — affects catch math
+  /** When set, after enemy attack we run this player move (turn-order: enemy went first). */
+  pendingPlayerMoveIdx?: number;
+  /** True if the enemy already attacked this turn (enemy-first ordering). Prevents a double attack. */
+  enemyActedThisTurn?: boolean;
+  /** Brief screen flash on critical hits (alpha 0..1). */
+  critFlash: number;
   // === Trainer battle support ===
   trainerBattle?: {
     name: string;
@@ -163,6 +186,9 @@ type BattleState = {
     intro: string[];
     victory: string[];
     prize: number;            // coin prize on full defeat
+    gymLeader?: boolean;      // smart AI + heal logic
+    potionCharges?: number;   // remaining boss-potions
+    rewardItem?: ItemId;      // bonus item granted on defeat (e.g. stone_badge)
   };
 };
 
@@ -185,7 +211,8 @@ type Mode =
   | "battle"
   | "fadeOut"
   | "fadeIn"
-  | "transition";
+  | "transition"
+  | "trainerSpot"; // LOS "!" exclamation pause before forced battle
 
 type GameRef = {
   save: GameSave;
@@ -207,6 +234,8 @@ type GameRef = {
   toast?: { text: string; timer: number };
   playTimeAccum: number;
   needsSavePulse: number;
+  /** When a trainer's line-of-sight catches the player, this holds the NPC + timer until battle starts. */
+  trainerSpot?: { npc: NpcDef; timer: number };
 };
 
 const STARTERS = ["cinderpaw", "aquadrip", "sprigling"];
@@ -226,6 +255,7 @@ export function Game({ username, displayName, onLogout }: Props) {
   const [savedFlash, setSavedFlash] = useState(false);
   const [coins, setCoins] = useState(0);
   const [lastSavedLabel, setLastSavedLabel] = useState<string>("");
+  const [hasBadge, setHasBadge] = useState(false);
 
   // Initialize state once
   useEffect(() => {
@@ -348,6 +378,9 @@ export function Game({ username, displayName, onLogout }: Props) {
         }
         // Update coin counter only when it actually changes
         setCoins((prev) => (prev === s.save.money ? prev : s.save.money));
+        // Toolbar badge indicator
+        const earned = !!s.save.flags["gymBrakDefeated"];
+        setHasBadge((prev) => (prev === earned ? prev : earned));
       }
       rafRef.current = requestAnimationFrame(loop);
     }
@@ -383,6 +416,62 @@ export function Game({ username, displayName, onLogout }: Props) {
     camTileY = Math.max(0, Math.min(mapH - VIEW_TILES_Y, camTileY));
     s.cameraX = camTileX * TILE_SIZE;
     s.cameraY = camTileY * TILE_SIZE;
+  }
+
+  /** Save-aware tile lookup: cleared cut trees become path; picked-up field items become grass. */
+  function effectiveTile(map: GameMap, x: number, y: number): TileType | null {
+    const t = getTile(map, x, y);
+    if (!t) return t;
+    const s = stateRef.current;
+    if (!s) return t;
+    if (t === "C" && s.save.flags[`cut:${map.id}:${x}:${y}`]) return "P";
+    if (t === "F") {
+      const fi = findFieldItem(map, x, y);
+      if (fi && s.save.flags[fi.flag]) return "G";
+    }
+    return t;
+  }
+
+  /** Save-aware blocked-tile check. */
+  function isBlockedNow(map: GameMap, x: number, y: number): boolean {
+    const t = effectiveTile(map, x, y);
+    if (t === null) return true;
+    if (BLOCKED_TILES.has(t)) return true;
+    if (map.npcs.some((n) => n.x === x && n.y === y)) return true;
+    return false;
+  }
+
+  /** Scan all undefeated trainers on the current map; if any has the player in LOS, trigger the spot animation. */
+  function checkTrainerLOS() {
+    const s = stateRef.current;
+    if (!s) return;
+    const map = MAPS[s.save.position.mapId];
+    for (const npc of map.npcs) {
+      if (!npc.trainer) continue;
+      if (s.save.flags[npc.trainer.flag]) continue;
+      if (!npc.trainer.visionRange || npc.trainer.visionRange <= 0) continue;
+      const los = trainerLineOfSight(npc);
+      if (los.some((t) => t.x === s.player.x && t.y === s.player.y)) {
+        s.mode = "trainerSpot";
+        s.trainerSpot = { npc, timer: 0.9 };
+        return;
+      }
+    }
+  }
+
+  /** Pickup a field item if the player just stepped onto one and it hasn't been picked up. */
+  function tryPickupFieldItem() {
+    const s = stateRef.current;
+    if (!s) return;
+    const map = MAPS[s.save.position.mapId];
+    const fi = findFieldItem(map, s.player.x, s.player.y);
+    if (!fi) return;
+    if (s.save.flags[fi.flag]) return;
+    s.save.flags[fi.flag] = true;
+    addToBag(s.save.bag, fi.itemId, fi.qty);
+    const it = ITEMS[fi.itemId];
+    s.toast = { text: `Found ${it.name}!`, timer: 1.5 };
+    startDialogue([`You found a ${it.name} on the ground!`, `(Added to BAG.)`]);
   }
 
   function startDialogue(lines: string[], onDone?: () => void) {
@@ -437,7 +526,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const map = MAPS[s.save.position.mapId];
     const tx = s.player.x + (dir === "left" ? -1 : dir === "right" ? 1 : 0);
     const ty = s.player.y + (dir === "up" ? -1 : dir === "down" ? 1 : 0);
-    if (isBlocked(map, tx, ty)) return;
+    if (isBlockedNow(map, tx, ty)) return;
     s.player.isMoving = true;
     s.player.moveProgress = 0;
   }
@@ -485,6 +574,23 @@ export function Game({ username, displayName, onLogout }: Props) {
       startDialogue(sign.text);
       return;
     }
+    // Cuttable tree — uses the Cut Stone key item, then clears the tile permanently.
+    const faced = getTile(map, tx, ty);
+    if (faced === "C" && !s.save.flags[`cut:${map.id}:${tx}:${ty}`]) {
+      const hasStone = s.save.flags["gotCutStone"] || getBagCount(s.save.bag, "cut_stone") > 0;
+      if (!hasStone) {
+        startDialogue(["A strange pink-leafed tree...", "It might fall to a special stone."]);
+        return;
+      }
+      // Yes/No confirmation
+      startMenu({
+        kind: "yesno",
+        options: ["Yes", "No"],
+        selected: 0,
+        data: { prompt: ["Use the Cut Stone on this tree?"], action: "cutTree", args: { x: tx, y: ty } },
+      });
+      return;
+    }
     // Check tile player stands on for healing pad
     const here = getTile(map, s.player.x, s.player.y);
     if (here === "H") {
@@ -520,6 +626,23 @@ export function Game({ username, displayName, onLogout }: Props) {
     }
     if (npc.requiresFlag && !s.save.flags[npc.requiresFlag]) {
       startDialogue(npc.dialogue);
+      return;
+    }
+    // === One-time item giver (e.g. Cut Tutor) ===
+    if (npc.givesItem) {
+      const gift = npc.givesItem;
+      if (s.save.flags[gift.flag]) {
+        startDialogue(npc.altDialogue ?? npc.dialogue);
+        return;
+      }
+      startDialogue(npc.dialogue, () => {
+        const s2 = stateRef.current;
+        if (!s2) return;
+        s2.save.flags[gift.flag] = true;
+        addToBag(s2.save.bag, gift.itemId, gift.qty);
+        play("confirm");
+        startDialogue([`Received ${ITEMS[gift.itemId].name} x${gift.qty}!`]);
+      });
       return;
     }
     if (npc.shop) {
@@ -626,6 +749,14 @@ export function Game({ username, displayName, onLogout }: Props) {
         return;
       }
     }
+    // Yes/No: left/right toggles between Yes (0) and No (1)
+    if (m.kind === "yesno") {
+      if (key === "left" || key === "up") { m.selected = 0; return; }
+      if (key === "right" || key === "down") { m.selected = 1; return; }
+      if (key === "confirm") { handleMenuConfirm(); return; }
+      if (key === "cancel" || key === "menu") { handleMenuCancel(); return; }
+      return;
+    }
     if (key === "up") {
       m.selected = (m.selected - 1 + m.options.length) % m.options.length;
     } else if (key === "down") {
@@ -662,6 +793,9 @@ export function Game({ username, displayName, onLogout }: Props) {
         s.battle.phase = "menu";
         s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
       }
+    } else if (k === "yesno" || k === "partyTarget" || k === "moveLearn") {
+      // For yes/no, cancel = "no"; for the others, cancel just closes.
+      closeMenu();
     }
   }
 
@@ -851,7 +985,7 @@ export function Game({ username, displayName, onLogout }: Props) {
       }
       const it = ITEMS[itemId];
       const qty = getBagCount(s.save.bag, itemId);
-      // Field-use items (Repel) consume on use; healers/revives can also be applied
+      // Repel
       if (it.category === "field" && itemId === "repel") {
         if (qty <= 0) { startDialogue([`You have no ${it.name} left.`]); s.menu = undefined; return; }
         removeFromBag(s.save.bag, itemId, 1);
@@ -863,31 +997,24 @@ export function Game({ username, displayName, onLogout }: Props) {
         ]);
         return;
       }
-      if (it.category === "heal" && it.healAmount) {
-        // Pick first non-fainted creature below full HP
-        const idx = s.save.party.findIndex((c) => c.currentHp > 0 && c.currentHp < c.maxHp);
-        if (idx < 0) { s.menu = undefined; startDialogue([`All your Monstro are at full health.`]); return; }
-        const target = s.save.party[idx];
-        const before = target.currentHp;
-        target.currentHp = Math.min(target.maxHp, target.currentHp + it.healAmount);
-        const healed = target.currentHp - before;
-        removeFromBag(s.save.bag, itemId, 1);
-        s.menu = undefined;
-        startDialogue([`Used ${it.name} on ${SPECIES[target.speciesId].name}.`, `Restored ${healed} HP.`]);
+      // Escape Rope — confirm before warping
+      if (it.category === "field" && itemId === "escape_rope") {
+        if (qty <= 0) { startDialogue([`No Escape Rope left.`]); s.menu = undefined; return; }
+        startMenu({
+          kind: "yesno",
+          options: ["Yes", "No"],
+          selected: 0,
+          data: { prompt: ["Use the Escape Rope?"], action: "escapeRope" },
+        });
         return;
       }
-      if (it.category === "revive" && it.reviveFactor) {
-        const idx = s.save.party.findIndex((c) => c.currentHp <= 0);
-        if (idx < 0) { s.menu = undefined; startDialogue([`No fainted Monstro to revive.`]); return; }
-        const target = s.save.party[idx];
-        target.currentHp = Math.max(1, Math.floor(target.maxHp * it.reviveFactor));
-        target.status = "ok";
-        removeFromBag(s.save.bag, itemId, 1);
-        s.menu = undefined;
-        startDialogue([`Revived ${SPECIES[target.speciesId].name}!`]);
+      // Heal / Status-cure / PP / Revive — open a "choose a Monstro" prompt
+      if (it.category === "heal" || it.category === "status" || it.category === "pp" || it.category === "revive") {
+        if (s.save.party.length === 0) { startDialogue([`You have no Monstro to use this on.`]); s.menu = undefined; return; }
+        openPartyTarget(itemId);
         return;
       }
-      // Default: show description
+      // Capture items / key items: just show description
       s.menu = undefined;
       startDialogue([
         `${it.name} (x${qty})`,
@@ -969,7 +1096,178 @@ export function Game({ username, displayName, onLogout }: Props) {
         s2.menu = { kind: "shop", options: buildShopOptions(shopList), selected: returnSelected, data: { itemIds: shopList } };
         s2.mode = "menu";
       });
+    } else if (m.kind === "yesno") {
+      // 0 = Yes, 1 = No
+      const yes = m.selected === 0;
+      const action = m.data?.action as string | undefined;
+      const args = m.data?.args ?? {};
+      s.menu = undefined;
+      if (!yes) {
+        s.mode = "overworld";
+        return;
+      }
+      if (action === "cutTree") {
+        const map = MAPS[s.save.position.mapId];
+        s.save.flags[`cut:${map.id}:${args.x}:${args.y}`] = true;
+        play("hit");
+        startDialogue([`The tree fell away with a soft chime!`]);
+      } else if (action === "escapeRope") {
+        // Teleport to Lumencove healing pad (the only safe haven so far)
+        removeFromBag(s.save.bag, "escape_rope", 1);
+        s.save.position = { mapId: "lumencove", x: 13, y: 4, facing: "down" };
+        s.player.x = 13;
+        s.player.y = 4;
+        s.player.facing = "down";
+        centerCamera(s);
+        startDialogue(["The Escape Rope whisked you back to Lumencove!"]);
+      }
+    } else if (m.kind === "moveLearn") {
+      // Choosing which existing move slot to forget. Last option is "Don't learn".
+      const target = m.data?.target as Creature | undefined;
+      const newMoveId = m.data?.newMoveId as string | undefined;
+      const queue = (m.data?.queue as string[]) || [];
+      if (!target || !newMoveId) { closeMenu(); return; }
+      if (m.selected >= 4) {
+        // Don't learn this move; consume from queue and ask about the next
+        progressMoveLearnQueue(target, queue);
+        return;
+      }
+      const forgotName = MOVES[target.moves[m.selected].moveId].name;
+      const mv = MOVES[newMoveId];
+      target.moves[m.selected] = { moveId: newMoveId, pp: mv.pp, maxPp: mv.pp };
+      s.menu = undefined;
+      startDialogue([
+        `1, 2, and... POOF!`,
+        `${SPECIES[target.speciesId].name} forgot ${forgotName}!`,
+        `${SPECIES[target.speciesId].name} learned ${mv.name}!`,
+      ], () => progressMoveLearnQueue(target, queue));
+    } else if (m.kind === "partyTarget") {
+      const itemId = m.data?.itemId as ItemId | undefined;
+      if (!itemId) { closeMenu(); return; }
+      applyItemToPartyMember(itemId, m.selected);
     }
+  }
+
+  /** Apply a status / pp / heal item to the chosen party member, then close. */
+  function applyItemToPartyMember(itemId: ItemId, partyIdx: number) {
+    const s = stateRef.current;
+    if (!s) return;
+    const c = s.save.party[partyIdx];
+    if (!c) { closeMenu(); return; }
+    const it = ITEMS[itemId];
+    if (it.curesStatus) {
+      const need = it.curesStatus;
+      if (c.status === "ok" || c.status === "fainted") {
+        startDialogue([`${SPECIES[c.speciesId].name} doesn't need that.`]);
+        s.menu = undefined;
+        return;
+      }
+      if (need !== "any" && c.status !== need) {
+        startDialogue([`That doesn't work on ${SPECIES[c.speciesId].name}'s current condition.`]);
+        s.menu = undefined;
+        return;
+      }
+      c.status = "ok";
+      c.sleepTurns = 0;
+      removeFromBag(s.save.bag, itemId, 1);
+      play("heal");
+      s.menu = undefined;
+      startDialogue([`Used ${it.name} on ${SPECIES[c.speciesId].name}.`, `Cured!`]);
+      return;
+    }
+    if (it.ppRestore) {
+      let restored = 0;
+      for (const slot of c.moves) {
+        const before = slot.pp;
+        slot.pp = Math.min(slot.maxPp, slot.pp + it.ppRestore);
+        restored += slot.pp - before;
+      }
+      removeFromBag(s.save.bag, itemId, 1);
+      play("heal");
+      s.menu = undefined;
+      startDialogue([`Used ${it.name} on ${SPECIES[c.speciesId].name}.`, `Restored ${restored} PP across moves.`]);
+      return;
+    }
+    if (it.healAmount) {
+      if (c.currentHp >= c.maxHp) {
+        startDialogue([`${SPECIES[c.speciesId].name} is at full HP.`]);
+        s.menu = undefined;
+        return;
+      }
+      const before = c.currentHp;
+      c.currentHp = Math.min(c.maxHp, c.currentHp + it.healAmount);
+      removeFromBag(s.save.bag, itemId, 1);
+      play("heal");
+      s.menu = undefined;
+      startDialogue([`Used ${it.name} on ${SPECIES[c.speciesId].name}.`, `Restored ${c.currentHp - before} HP.`]);
+      return;
+    }
+    if (it.reviveFactor) {
+      if (c.currentHp > 0) {
+        startDialogue([`${SPECIES[c.speciesId].name} doesn't need a Revive.`]);
+        s.menu = undefined;
+        return;
+      }
+      c.currentHp = Math.max(1, Math.floor(c.maxHp * it.reviveFactor));
+      c.status = "ok";
+      removeFromBag(s.save.bag, itemId, 1);
+      play("heal");
+      s.menu = undefined;
+      startDialogue([`Revived ${SPECIES[c.speciesId].name}!`]);
+      return;
+    }
+    s.menu = undefined;
+  }
+
+  /** Open a "choose a Monstro" menu to apply a status / pp / heal item out of battle. */
+  function openPartyTarget(itemId: ItemId) {
+    const s = stateRef.current;
+    if (!s) return;
+    const labels = s.save.party.map((c) => {
+      const sp = SPECIES[c.speciesId];
+      const stat = c.status && c.status !== "ok" && c.status !== "fainted" ? ` [${c.status.toUpperCase()}]` : "";
+      return `${sp.name} Lv${c.level} HP ${c.currentHp}/${c.maxHp}${stat}`;
+    });
+    startMenu({ kind: "partyTarget", options: [...labels, "Cancel"], selected: 0, data: { itemId } });
+  }
+
+  /** Walk the pendingLearns queue: open a forget-prompt for the next move, or close. */
+  function progressMoveLearnQueue(target: Creature, queue: string[]) {
+    const s = stateRef.current;
+    if (!s) return;
+    if (queue.length === 0) {
+      s.menu = undefined;
+      s.mode = "overworld";
+      return;
+    }
+    const [next, ...rest] = queue;
+    const mv = MOVES[next];
+    s.menu = {
+      kind: "moveLearn",
+      options: [
+        ...target.moves.map((m) => MOVES[m.moveId].name),
+        `Don't learn ${mv.name}`,
+      ],
+      selected: 0,
+      data: { target, newMoveId: next, queue: rest },
+    };
+    s.mode = "menu";
+    startDialogue([
+      `${SPECIES[target.speciesId].name} wants to learn ${mv.name}!`,
+      `But it already knows 4 moves...`,
+      `Which one should be forgotten?`,
+    ], () => {
+      const s2 = stateRef.current;
+      if (!s2) return;
+      // After dialogue, ensure menu is still set; if cleared, restore.
+      if (!s2.menu) s2.menu = {
+        kind: "moveLearn",
+        options: [...target.moves.map((m) => MOVES[m.moveId].name), `Don't learn ${mv.name}`],
+        selected: 0,
+        data: { target, newMoveId: next, queue: rest },
+      };
+      s2.mode = "menu";
+    });
   }
 
   // Build the labelled option list for a shop, including the trailing "Leave".
@@ -1172,10 +1470,20 @@ export function Game({ username, displayName, onLogout }: Props) {
       b.phase = "menu";
       s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
     } else if (b.phase === "playerAttack") {
-      // After player attack message, check if enemy fainted, else enemy attacks
+      // After player attack message, check if enemy fainted, else enemy attacks (unless it already did this turn).
       if (b.enemy.currentHp <= 0) {
         play("faint");
         onEnemyFainted();
+      } else if (b.enemyActedThisTurn) {
+        // Enemy already attacked first this turn — go straight to end-of-turn residuals.
+        b.enemyActedThisTurn = false;
+        const tickMsgs = endOfTurnTick(s);
+        if (tickMsgs.length > 0) {
+          queueBattleMessages(tickMsgs);
+        } else {
+          b.phase = "menu";
+          s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+        }
       } else {
         doEnemyAttack();
       }
@@ -1183,6 +1491,22 @@ export function Game({ username, displayName, onLogout }: Props) {
       if (s.save.party[b.activeIdx].currentHp <= 0) {
         play("faint");
         onPlayerFainted();
+      } else if (b.pendingPlayerMoveIdx !== undefined) {
+        // Enemy went first; now run the player's queued move
+        const moveIdx = b.pendingPlayerMoveIdx;
+        b.pendingPlayerMoveIdx = undefined;
+        const c = s.save.party[b.activeIdx];
+        const slot = c.moves[moveIdx];
+        if (slot) {
+          const enemyLabel = b.trainerBattle
+            ? `${b.trainerBattle.name}'s ${SPECIES[b.enemy.speciesId].name}`
+            : `Wild ${SPECIES[b.enemy.speciesId].name}`;
+          const msgs = executeMove(c, b.enemy, slot, SPECIES[c.speciesId].name, enemyLabel, true, "playerAttack");
+          queueBattleMessages(msgs);
+        } else {
+          b.phase = "menu";
+          s.menu = { kind: "battleMain", options: ["FIGHT", "BAG", "PARTY", "RUN"], selected: 0 };
+        }
       } else {
         // End-of-turn residual status damage (player first then enemy)
         const tickMsgs = endOfTurnTick(s);
@@ -1279,10 +1603,35 @@ export function Game({ username, displayName, onLogout }: Props) {
       defender.currentHp = Math.max(0, defender.currentHp - res.dmg);
       if (isPlayer) b.enemyShake = 0.5; else b.playerShake = 0.5;
       if (res.dmg > 0) play(res.crit ? "crit" : "hit");
-      if (res.crit && res.dmg > 0) msgs.push({ text: "A critical hit!" });
+      if (res.crit && res.dmg > 0) {
+        msgs.push({ text: "A critical hit!" });
+        b.critFlash = 1;
+      }
       if (res.eff === 0) msgs.push({ text: "It had no effect..." });
       else if (res.eff >= 2) msgs.push({ text: "It's super effective!" });
       else if (res.eff > 0 && res.eff < 1) msgs.push({ text: "It's not very effective..." });
+
+      // Drain effect — heal attacker by a fraction of damage dealt
+      if (move.effect?.drainFraction && res.dmg > 0) {
+        const before = attacker.currentHp;
+        attacker.currentHp = Math.min(attacker.maxHp, attacker.currentHp + Math.max(1, Math.floor(res.dmg * move.effect.drainFraction)));
+        const drained = attacker.currentHp - before;
+        if (drained > 0) msgs.push({ text: `${actorLabel} drained ${drained} HP!` });
+      }
+    }
+
+    // Self-heal (e.g. Recover) — only for 0-power status moves
+    if (move.effect?.selfHealFraction && move.power === 0) {
+      const before = attacker.currentHp;
+      const heal = Math.max(1, Math.floor(attacker.maxHp * move.effect.selfHealFraction));
+      attacker.currentHp = Math.min(attacker.maxHp, attacker.currentHp + heal);
+      const restored = attacker.currentHp - before;
+      if (restored > 0) {
+        msgs.push({ text: `${actorLabel} restored ${restored} HP!` });
+        play("heal");
+      } else {
+        msgs.push({ text: `${actorLabel}'s HP is already full!` });
+      }
     }
 
     // Apply secondary status (only if target still alive)
@@ -1366,19 +1715,85 @@ export function Game({ username, displayName, onLogout }: Props) {
     ];
   }
 
+  /**
+   * Pick which side acts first given each side's planned move. Higher priority
+   * wins; tied priority falls back to effective speed; tied speed is a coin flip.
+   */
+  function decidePlayerFirst(playerMove: Move, enemyMove: Move, player: Creature, enemy: Creature): boolean {
+    const pPri = playerMove.priority ?? 0;
+    const ePri = enemyMove.priority ?? 0;
+    if (pPri !== ePri) return pPri > ePri;
+    const pSpd = effectiveStat(player, "spd");
+    const eSpd = effectiveStat(enemy, "spd");
+    if (pSpd !== eSpd) return pSpd > eSpd;
+    return Math.random() < 0.5;
+  }
+
   function doPlayerAttack(moveIdx: number) {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
     const c = s.save.party[b.activeIdx];
-    const moveSlot = c.moves[moveIdx];
-    const msgs = executeMove(
-      c, b.enemy, moveSlot,
-      SPECIES[c.speciesId].name,
-      `Wild ${SPECIES[b.enemy.speciesId].name}`,
-      true, "playerAttack"
-    );
-    queueBattleMessages(msgs);
+    const playerMoveSlot = c.moves[moveIdx];
+    const playerMove = MOVES[playerMoveSlot.moveId];
+    // Pick the enemy's response in advance so we can compute turn order
+    const enemyMoveSlot = pickEnemyMove();
+    const enemyMove = MOVES[enemyMoveSlot.moveId];
+    if (decidePlayerFirst(playerMove, enemyMove, c, b.enemy)) {
+      const msgs = executeMove(
+        c, b.enemy, playerMoveSlot,
+        SPECIES[c.speciesId].name,
+        b.trainerBattle ? `${b.trainerBattle.name}'s ${SPECIES[b.enemy.speciesId].name}` : `Wild ${SPECIES[b.enemy.speciesId].name}`,
+        true, "playerAttack",
+      );
+      queueBattleMessages(msgs);
+    } else {
+      // Enemy goes first; player attacks after if still alive.
+      b.pendingPlayerMoveIdx = moveIdx;
+      b.enemyActedThisTurn = true;
+      doEnemyAttackWithSlot(enemyMoveSlot);
+    }
+  }
+
+  /**
+   * Pick the enemy's move using random AI for wild battles and a smart scorer for trainers.
+   * Filtering by remaining PP happens inside chooseBestMove.
+   */
+  function pickEnemyMove(): { moveId: string; pp: number; maxPp: number } {
+    const s = stateRef.current!;
+    const b = s.battle!;
+    const target = s.save.party[b.activeIdx];
+    if (b.trainerBattle) {
+      return chooseBestMove(b.enemy, target);
+    }
+    // Wild — random with PP preference
+    const usable = b.enemy.moves.filter((m) => m.pp > 0);
+    const pool = usable.length > 0 ? usable : b.enemy.moves;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  /**
+   * Boss heal-AI: when HP drops below 30% and potionCharges remain, the gym leader
+   * spends one to fully restore its active Monstro. Returns true if it healed and
+   * the turn is consumed.
+   */
+  function trainerAITryHeal(): boolean {
+    const s = stateRef.current;
+    if (!s || !s.battle || !s.battle.trainerBattle) return false;
+    const tb = s.battle.trainerBattle;
+    if (!tb.gymLeader || !tb.potionCharges || tb.potionCharges <= 0) return false;
+    const e = s.battle.enemy;
+    if (e.currentHp <= 0) return false;
+    if (e.currentHp / e.maxHp > 0.3) return false;
+    tb.potionCharges -= 1;
+    const before = e.currentHp;
+    e.currentHp = e.maxHp;
+    play("heal");
+    queueBattleMessages([
+      { text: `${tb.name} used a Hyper Potion!` },
+      { text: `${SPECIES[e.speciesId].name} restored ${e.currentHp - before} HP!`, next: "enemyAttack" },
+    ]);
+    return true;
   }
 
   function doEnemyAttack() {
@@ -1390,14 +1805,23 @@ export function Game({ username, displayName, onLogout }: Props) {
       battleMessage(`${SPECIES[b.enemy.speciesId].name} did nothing!`, "enemyAttack");
       return;
     }
-    // Enemy AI: heavily prefer non-zero-PP damage moves; fall back to any move.
-    const usable = b.enemy.moves.filter((m) => m.pp > 0);
-    const pool = usable.length > 0 ? usable : b.enemy.moves;
-    const moveSlot = pool[Math.floor(Math.random() * pool.length)];
+    // Gym leader heal opportunity short-circuits the attack
+    if (trainerAITryHeal()) return;
+    const moveSlot = pickEnemyMove();
+    doEnemyAttackWithSlot(moveSlot);
+  }
+
+  /** Shared core of enemy attack — used by both first-actor and second-actor paths. */
+  function doEnemyAttackWithSlot(moveSlot: { moveId: string; pp: number; maxPp: number }) {
+    const s = stateRef.current;
+    if (!s || !s.battle) return;
+    const b = s.battle;
+    b.phase = "enemyAttack";
     const target = s.save.party[b.activeIdx];
+    const enemyLabel = b.trainerBattle ? `${b.trainerBattle.name}'s ${SPECIES[b.enemy.speciesId].name}` : `Wild ${SPECIES[b.enemy.speciesId].name}`;
     const msgs = executeMove(
       b.enemy, target, moveSlot,
-      `Wild ${SPECIES[b.enemy.speciesId].name}`,
+      enemyLabel,
       SPECIES[target.speciesId].name,
       false, "enemyAttack"
     );
@@ -1435,6 +1859,12 @@ export function Game({ username, displayName, onLogout }: Props) {
       for (const mvName of result.newMoves) {
         msgs.push({ text: `${SPECIES[c.speciesId].name} learned ${mvName}!` });
       }
+      // Pending learns (couldn't auto-add because moveset is full) get queued
+      // and surfaced after the battle ends, so the player can pick what to forget.
+      if (result.pendingLearns.length > 0) {
+        (b as any).pendingLearns = (b as any).pendingLearns ?? [];
+        (b as any).pendingLearns.push({ creature: c, moves: result.pendingLearns });
+      }
       const evoMsgs = evolutionMessages(c);
       if (evoMsgs.length > 0) {
         evoMsgs[0].action = () => play("evolution");
@@ -1442,7 +1872,7 @@ export function Game({ username, displayName, onLogout }: Props) {
       }
     }
 
-    // Trainer: queue next Monstro, or end battle with prize
+    // Trainer: queue next Monstro, or end battle with prize + reward item
     if (b.trainerBattle) {
       const t = b.trainerBattle;
       t.defeatedIdx.push(t.activeIdx);
@@ -1461,13 +1891,21 @@ export function Game({ username, displayName, onLogout }: Props) {
         } });
         msgs.push({ text: `${t.name} sent out ${SPECIES[nextMon.speciesId].name}!`, next: "trainerSwitch" });
       } else {
-        // Final defeat — pay prize and set flag
+        // Final defeat — pay prize, set flag, and award reward item if any
         s.save.money += t.prize;
         const flag = (b as any).trainerFlag as string | undefined;
         if (flag) s.save.flags[flag] = true;
         msgs.push({ text: `You defeated ${t.name}!` });
         for (const v of t.victory) msgs.push({ text: v });
         msgs.push({ text: `Received ${t.prize} coins as prize!` });
+        if (t.rewardItem) {
+          const reward = t.rewardItem;
+          addToBag(s.save.bag, reward, 1);
+          msgs.push({ text: `You received the ${ITEMS[reward].name}!`, action: () => play("levelup") });
+        }
+        if (t.gymLeader) {
+          msgs.push({ text: `A new path opens for you, traveler!` });
+        }
       }
     }
 
@@ -1478,6 +1916,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const s = stateRef.current;
     if (!s || !s.battle) return;
     const b = s.battle;
+    b.pendingPlayerMoveIdx = undefined; // stale move from the faint turn must not replay
     const c = s.save.party[b.activeIdx];
     // Find next non-fainted
     const nextIdx = s.save.party.findIndex((p, i) => i !== b.activeIdx && p.currentHp > 0);
@@ -1578,9 +2017,22 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (!s) return;
     // Reset volatile (stat stages) on every party member so they don't bleed across fights.
     for (const c of s.save.party) clearVolatile(c);
+    // Pull any pending move-learn prompts off the battle and surface them to the player.
+    const pending: { creature: Creature; moves: string[] }[] = (s.battle as any)?.pendingLearns ?? [];
     s.battle = undefined;
     s.menu = undefined;
     s.mode = "overworld";
+    if (pending.length > 0) {
+      // Flatten into a list of (creature, single move) tasks
+      const tasks: { creature: Creature; moves: string[] }[] = [];
+      for (const p of pending) tasks.push({ creature: p.creature, moves: p.moves });
+      const runTasks = () => {
+        const t = tasks.shift();
+        if (!t) return;
+        progressMoveLearnQueue(t.creature, t.moves);
+      };
+      runTasks();
+    }
   }
 
   function startBattle(speciesId: string, level: number) {
@@ -1608,6 +2060,7 @@ export function Game({ username, displayName, onLogout }: Props) {
       turnOver: false,
       enemyHpShown: enemy.currentHp,
       playerHpShown: s.save.party[0]?.currentHp || 0,
+      critFlash: 0,
     };
     s.mode = "battle";
     if (s.battle.activeIdx < 0) s.battle.activeIdx = 0;
@@ -1617,7 +2070,17 @@ export function Game({ username, displayName, onLogout }: Props) {
    * Start a trainer battle. The trainer's first Monstro is sent out and any
    * subsequent KOs trigger their next; trainer wins broadcast a prize.
    */
-  function startTrainerBattle(t: { name: string; party: { speciesId: string; level: number }[]; intro: string[]; victory: string[]; prize: number; flag: string }) {
+  function startTrainerBattle(t: {
+    name: string;
+    party: { speciesId: string; level: number }[];
+    intro: string[];
+    victory: string[];
+    prize: number;
+    flag: string;
+    gymLeader?: boolean;
+    potionCharges?: number;
+    rewardItem?: ItemId;
+  }) {
     const s = stateRef.current;
     if (!s) return;
     if (t.party.length === 0) return;
@@ -1644,6 +2107,7 @@ export function Game({ username, displayName, onLogout }: Props) {
       turnOver: false,
       enemyHpShown: first.currentHp,
       playerHpShown: s.save.party[0]?.currentHp || 0,
+      critFlash: 0,
       trainerBattle: {
         name: t.name,
         party,
@@ -1652,6 +2116,9 @@ export function Game({ username, displayName, onLogout }: Props) {
         intro: t.intro,
         victory: t.victory,
         prize: t.prize,
+        gymLeader: t.gymLeader,
+        potionCharges: t.potionCharges ?? 0,
+        rewardItem: t.rewardItem,
       },
     };
     // Persist the flag reference on the battle so we can set it after victory.
@@ -1678,6 +2145,9 @@ export function Game({ username, displayName, onLogout }: Props) {
       if (s.menu?.kind === "dex") return "↑ ↓ Browse · SPACE View · ESC Back";
       if (s.menu?.kind === "dex_detail") return "↑ ↓ Browse · SPACE/ESC Back";
       if (s.menu?.kind === "pc") return "↑ ↓ Browse · SPACE Swap · ESC Close";
+      if (s.menu?.kind === "yesno") return "← → choose · SPACE Confirm · ESC Cancel";
+      if (s.menu?.kind === "moveLearn") return "↑ ↓ Browse · SPACE Forget · ESC Cancel";
+      if (s.menu?.kind === "partyTarget") return "↑ ↓ Browse · SPACE Use · ESC Cancel";
       return "Arrows · Navigate · SPACE · Select · ESC · Close";
     }
     if (s.mode === "battle" && s.menu?.kind === "battleSwitch") {
@@ -1732,6 +2202,12 @@ export function Game({ username, displayName, onLogout }: Props) {
               startDialogue(["The Repel's effect wore off."]);
             }
           }
+          // Field-item pickup — happens BEFORE encounter check so the item gets to you safely
+          if (tile === "F") {
+            tryPickupFieldItem();
+            centerCamera(s);
+            return;
+          }
           // Tall grass encounter — suppressed while Repel is active
           if (tile === "T" && (s.save.repelSteps ?? 0) <= 0) {
             const enc = rollEncounter(map);
@@ -1749,6 +2225,12 @@ export function Game({ username, displayName, onLogout }: Props) {
               "All Monstro are now at full HP.",
             ]);
           }
+          // Trainer line-of-sight: any undefeated trainer that "sees" the player triggers a forced battle.
+          checkTrainerLOS();
+          if (stateRef.current?.mode === "trainerSpot") {
+            centerCamera(s);
+            return;
+          }
           // Auto-continue if still pressing direction
           centerCamera(s);
           const next: Facing | null =
@@ -1758,6 +2240,15 @@ export function Game({ username, displayName, onLogout }: Props) {
             s.pressed.has("right") ? "right" : null;
           if (next) tryMove(next);
         }
+      }
+    } else if (s.mode === "trainerSpot" && s.trainerSpot) {
+      // Tick the LOS-spot timer, then auto-run the trainer NPC (which fires the battle).
+      s.trainerSpot.timer -= dt;
+      if (s.trainerSpot.timer <= 0) {
+        const npc = s.trainerSpot.npc;
+        s.trainerSpot = undefined;
+        s.mode = "overworld";
+        runNpc(npc); // dialogue + trainer battle
       }
     } else if (s.mode === "dialogue" && s.dialogue) {
       // Animate text typing — hold confirm to fast-forward
@@ -1780,6 +2271,8 @@ export function Game({ username, displayName, onLogout }: Props) {
       // Shake
       if (b.playerShake > 0) b.playerShake = Math.max(0, b.playerShake - dt * 2);
       if (b.enemyShake > 0) b.enemyShake = Math.max(0, b.enemyShake - dt * 2);
+      // Crit flash decay
+      if (b.critFlash > 0) b.critFlash = Math.max(0, b.critFlash - dt * 2.4);
       // Attack animation
       if (b.playerAnimX > 0) b.playerAnimX = Math.max(0, b.playerAnimX - dt * 2);
       if (b.enemyAnimX > 0) b.enemyAnimX = Math.max(0, b.enemyAnimX - dt * 2);
@@ -1888,7 +2381,7 @@ export function Game({ username, displayName, onLogout }: Props) {
     const startTY = Math.floor(camY / TILE_SIZE);
     for (let ty = startTY; ty <= startTY + VIEW_TILES_Y + 1; ty++) {
       for (let tx = startTX; tx <= startTX + VIEW_TILES_X + 1; tx++) {
-        const t = getTile(map, tx, ty);
+        const t = effectiveTile(map, tx, ty);
         if (t === null) {
           // Draw void
           ctx.fillStyle = "#000";
@@ -1901,21 +2394,29 @@ export function Game({ username, displayName, onLogout }: Props) {
       }
     }
 
-    // Draw NPCs
+    // Draw NPCs (skip the LOS-spot NPC if we're rendering the "!" — it stays in place anyway)
     for (const npc of map.npcs) {
       const px = npc.x * TILE_SIZE - camX;
       const py = npc.y * TILE_SIZE - camY;
       if (px < -TILE_SIZE || px > CANVAS_W || py < -TILE_SIZE || py > CANVAS_H) continue;
-      const npcSprite =
-        npc.spriteKey === "clerk" ? NPC_CLERK :
-        npc.spriteKey === "trainer" ? NPC_TRAINER :
-        NPC_MENTOR;
+      const npcSprite = npcSpriteFor(npc.spriteKey);
+      // Slight shadow oval beneath the NPC for grounded feel.
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.beginPath();
+      ctx.ellipse(px + TILE_SIZE / 2, py + TILE_SIZE - 4, TILE_SIZE * 0.4, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
       drawSprite(ctx, npcSprite, px, py, PIXEL_SCALE);
     }
 
-    // Draw player
+    // Player drop shadow
     const px = playerPxX - camX;
     const py = playerPxY - camY;
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath();
+    ctx.ellipse(px + TILE_SIZE / 2, py + TILE_SIZE - 4, TILE_SIZE * 0.4, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw player
     let sprite: Sprite;
     let flip = false;
     const useFrameB = s.player.isMoving && s.player.walkFrame === 1;
@@ -1925,21 +2426,55 @@ export function Game({ username, displayName, onLogout }: Props) {
     else { sprite = PLAYER_LEFT_A; flip = true; }
     drawSprite(ctx, sprite, px, py, PIXEL_SCALE, flip);
 
+    // Render "!" emote over trainer head during LOS spot pause
+    if (s.mode === "trainerSpot" && s.trainerSpot) {
+      const tn = s.trainerSpot.npc;
+      const ex = tn.x * TILE_SIZE - camX;
+      const ey = tn.y * TILE_SIZE - camY - TILE_SIZE + 4 + Math.sin(performance.now() / 60) * 2;
+      drawSprite(ctx, EXCLAIM, ex, ey, PIXEL_SCALE);
+    }
+
+    // Dark-cave vignette (cuts the rendered map into a flashlight circle around the player).
+    if (map.dark) {
+      const cx = px + TILE_SIZE / 2;
+      const cy = py + TILE_SIZE / 2;
+      const radius = TILE_SIZE * 4;
+      const grad = ctx.createRadialGradient(cx, cy, radius * 0.4, cx, cy, radius);
+      grad.addColorStop(0, "rgba(0,0,0,0)");
+      grad.addColorStop(1, "rgba(0,0,0,0.85)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    }
+
     // Map name banner (briefly when changed)
     // (simple - always show a small marker)
     drawTextBox(ctx, map.name.toUpperCase(), 8, 8, "#fff", "#000", 11);
   }
 
+  function npcSpriteFor(kind: NpcDef["spriteKey"]): Sprite {
+    switch (kind) {
+      case "clerk": return NPC_CLERK;
+      case "trainer": return NPC_TRAINER;
+      case "picnicker": return NPC_PICNICKER;
+      case "fisher": return NPC_FISHER;
+      case "gymleader": return NPC_GYM_LEADER;
+      case "mentor":
+      default: return NPC_MENTOR;
+    }
+  }
+
   function renderTile(ctx: CanvasRenderingContext2D, t: TileType, px: number, py: number) {
     // Base layer
-    if (t === "G" || t === "T" || t === "X" || t === "N" || t === "I" || t === "H") {
+    if (t === "G" || t === "T" || t === "X" || t === "N" || t === "I" || t === "H" || t === "C" || t === "F") {
       drawSprite(ctx, TILE_GRASS, px, py, PIXEL_SCALE);
     } else if (t === "P" || t === "D") {
       drawSprite(ctx, TILE_PATH, px, py, PIXEL_SCALE);
     } else if (t === "S") {
       drawSprite(ctx, TILE_SAND, px, py, PIXEL_SCALE);
     } else if (t === "W") {
-      drawSprite(ctx, TILE_WATER, px, py, PIXEL_SCALE);
+      // 2-frame water animation, 600ms cycle
+      const waterFrame = Math.floor(performance.now() / 600) % 2 === 0 ? TILE_WATER : TILE_WATER_B;
+      drawSprite(ctx, waterFrame, px, py, PIXEL_SCALE);
     } else if (t === "B") {
       drawSprite(ctx, TILE_BUILDING, px, py, PIXEL_SCALE);
     }
@@ -1948,6 +2483,8 @@ export function Game({ username, displayName, onLogout }: Props) {
     if (t === "X") drawSprite(ctx, TILE_TREE, px, py, PIXEL_SCALE);
     if (t === "D") drawSprite(ctx, TILE_DOOR, px, py, PIXEL_SCALE);
     if (t === "I") drawSprite(ctx, TILE_SIGN, px, py, PIXEL_SCALE);
+    if (t === "C") drawSprite(ctx, TILE_CUT_TREE, px, py, PIXEL_SCALE);
+    if (t === "F") drawSprite(ctx, TILE_FIELD_ITEM, px, py, PIXEL_SCALE);
     if (t === "H") {
       // glowing pad
       const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
@@ -2060,6 +2597,100 @@ export function Game({ username, displayName, onLogout }: Props) {
       renderDexDetail(ctx, s, m);
     } else if (m.kind === "pc") {
       renderPcMenu(ctx, s, m);
+    } else if (m.kind === "yesno") {
+      renderYesNo(ctx, s, m);
+    } else if (m.kind === "moveLearn") {
+      renderMoveLearn(ctx, s, m);
+    } else if (m.kind === "partyTarget") {
+      renderPartyTarget(ctx, s, m);
+    }
+  }
+
+  function renderYesNo(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.65);
+    const prompt = (m.data?.prompt as string[]) ?? ["Are you sure?"];
+    const w = 320;
+    const h = 140;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    let py = y + 30;
+    for (const line of prompt) {
+      drawText(ctx, line, x + w / 2, py, "#fff", 13, "center");
+      py += 18;
+    }
+    const optY = y + h - 36;
+    for (let i = 0; i < m.options.length; i++) {
+      const ox = x + (i === 0 ? w / 2 - 70 : w / 2 + 10);
+      if (i === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.2)";
+        ctx.fillRect(ox - 8, optY - 14, 60, 22);
+      }
+      drawText(ctx, m.options[i], ox + 22, optY, i === m.selected ? "#ffe066" : "#fff", 14, "center");
+    }
+  }
+
+  function renderMoveLearn(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.6);
+    const target = m.data?.target as Creature | undefined;
+    const newMoveId = m.data?.newMoveId as string | undefined;
+    if (!target || !newMoveId) return;
+    const mv = MOVES[newMoveId];
+    const w = 420;
+    const h = 260;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawText(ctx, `${SPECIES[target.speciesId].name} learning ${mv.name}`, x + w / 2, y + 22, "#ffe066", 13, "center");
+    drawText(ctx, "Which move to forget?", x + w / 2, y + 42, "#88c8ff", 11, "center");
+    for (let i = 0; i < m.options.length; i++) {
+      const oy = y + 64 + i * 28;
+      if (i === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.2)";
+        ctx.fillRect(x + 10, oy - 14, w - 20, 26);
+        drawText(ctx, ">", x + 14, oy, "#ffe066", 13, "left");
+      }
+      const isCancel = i >= 4;
+      drawText(ctx, m.options[i], x + 36, oy, isCancel ? "#b8b8d4" : "#fff", 13, "left");
+      if (!isCancel && target.moves[i]) {
+        const slot = target.moves[i];
+        const mv2 = MOVES[slot.moveId];
+        drawText(ctx, `PWR ${mv2.power > 0 ? mv2.power : "—"}  PP ${slot.pp}/${slot.maxPp}`, x + w - 16, oy, "#cfcfdc", 11, "right");
+      }
+    }
+  }
+
+  function renderPartyTarget(ctx: CanvasRenderingContext2D, s: GameRef, m: Menu) {
+    dimBackground(ctx, 0.55);
+    const itemId = m.data?.itemId as ItemId | undefined;
+    const w = 420;
+    const h = 260;
+    const x = (CANVAS_W - w) / 2;
+    const y = (CANVAS_H - h) / 2 - 8;
+    ctx.fillStyle = "rgba(20,20,40,0.97)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#ffe066";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    const title = itemId ? `Use ${ITEMS[itemId].name} on...` : "Choose a Monstro";
+    drawText(ctx, title, x + w / 2, y + 22, "#ffe066", 14, "center");
+    for (let i = 0; i < m.options.length; i++) {
+      const oy = y + 50 + i * 24;
+      if (i === m.selected) {
+        ctx.fillStyle = "rgba(255,224,102,0.2)";
+        ctx.fillRect(x + 10, oy - 14, w - 20, 22);
+        drawText(ctx, ">", x + 14, oy, "#ffe066", 13, "left");
+      }
+      const isCancel = i >= s.save.party.length;
+      drawText(ctx, m.options[i], x + 36, oy, isCancel ? "#b8b8d4" : "#fff", 12, "left");
     }
   }
 
@@ -2169,21 +2800,20 @@ export function Game({ username, displayName, onLogout }: Props) {
     ctx.strokeRect(x, y, w, h);
     drawText(ctx, "WORLD MAP — VERDANT REGION", x + w / 2, y + 24, "#ffe066", 14, "center");
 
-    // Render the three regions as stacked boxes (north -> south)
-    // hearthwick (top), route1 (middle), lumencove (bottom)
+    // Render every known region as a stacked box (north → south progression).
     const mapIds = (m.data?.mapIds as string[]) || [];
-    const boxW = 220;
-    const boxH = 56;
+    const boxW = 240;
+    const boxH = 42;
     const cx = x + w / 2;
-    const startY = y + 60;
-    const gap = 24;
-    const order = ["hearthwick", "route1", "lumencove"];
+    const startY = y + 56;
+    const gap = 12;
+    const order = ["hearthwick", "whisperwood", "route1", "lumencove", "sunshore"];
     // Connecting path
     ctx.strokeStyle = "#6a4f2a";
     ctx.lineWidth = 6;
     ctx.beginPath();
     ctx.moveTo(cx, startY + boxH);
-    ctx.lineTo(cx, startY + 3 * boxH + 2 * gap);
+    ctx.lineTo(cx, startY + order.length * boxH + (order.length - 1) * gap);
     ctx.stroke();
     for (let i = 0; i < order.length; i++) {
       const id = order[i];
@@ -2193,13 +2823,13 @@ export function Game({ username, displayName, onLogout }: Props) {
       const by = startY + i * (boxH + gap);
       const isCurrent = id === s.save.position.mapId;
       const isSelected = mapIds[m.selected] === id;
-      ctx.fillStyle = isCurrent ? "#2c5a2c" : "#1f3a20";
+      ctx.fillStyle = isCurrent ? "#2c5a2c" : map.dark ? "#1a1a25" : "#1f3a20";
       ctx.fillRect(bx, by, boxW, boxH);
       ctx.strokeStyle = isSelected ? "#ffe066" : isCurrent ? "#9fe0a0" : "#5a7a5a";
       ctx.lineWidth = isSelected ? 3 : 2;
       ctx.strokeRect(bx, by, boxW, boxH);
-      drawText(ctx, map.name, bx + boxW / 2, by + 22, "#fff", 13, "center");
-      drawText(ctx, isCurrent ? "● You are here" : "○", bx + boxW / 2, by + 44, isCurrent ? "#ffe066" : "#88a888", 11, "center");
+      drawText(ctx, map.name, bx + boxW / 2, by + 18, "#fff", 12, "center");
+      drawText(ctx, isCurrent ? "● You are here" : "○", bx + boxW / 2, by + 34, isCurrent ? "#ffe066" : "#88a888", 10, "center");
     }
     // Hint
     drawText(ctx, "↑ ↓ to browse  ·  ESC to close", x + w / 2, y + h - 18, "#b8b8d4", 11, "center");
@@ -2474,6 +3104,11 @@ export function Game({ username, displayName, onLogout }: Props) {
       renderBattleMessage(ctx, b);
     }
 
+    // Crit flash overlay (decays quickly)
+    if (b.critFlash > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${b.critFlash * 0.55})`;
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    }
     // Fade-in
     if (b.fadeIn > 0) {
       ctx.fillStyle = `rgba(0,0,0,${b.fadeIn})`;
@@ -2738,6 +3373,11 @@ export function Game({ username, displayName, onLogout }: Props) {
         <span className="toolbar-btn" style={{ cursor: "default", color: "#ffd040" }} title="Spend at Marts to buy items">
           ⛁ {coins}
         </span>
+        {hasBadge && (
+          <span className="toolbar-btn" style={{ cursor: "default", color: "#d4cec0" }} title="Stone Badge — earned from Cave Warden Brak">
+            ◇ Stone Badge
+          </span>
+        )}
         <button className="toolbar-btn" onClick={() => doSave(true)} title="Save game (or press ESC > SAVE)">
           {savedFlash ? "✓ Saved" : (lastSavedLabel ? `Save (${lastSavedLabel})` : "Save")}
         </button>

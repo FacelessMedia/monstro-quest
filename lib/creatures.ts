@@ -2,6 +2,7 @@ import {
   Sprite,
   CINDERPAW, AQUADRIP, SPRIGLING, BOLTKIT, ROCKLE, WISPLET, BUZZBEE, GOOLET, SPINIFIN,
   CINDERWOLF, AQUAFLOW, SPRITEBLADE, BUZZHIVE,
+  SHROOMIE, MOSSBUN, STONEPUP, BATLING, LUMINOX, VOLTKIT, ROCKSIRE,
 } from "./sprites";
 
 export type ElementType = "fire" | "water" | "grass" | "electric" | "rock" | "ghost" | "bug" | "psychic" | "normal";
@@ -39,6 +40,10 @@ export type MoveEffect = {
   inflictStatus?: { kind: Exclude<StatusCondition, "ok" | "fainted">; chance: number };
   // Stat changes on the target or self. Use positive numbers to raise, negative to lower.
   statChange?: { target: "self" | "foe"; stat: StatKey; delta: number; chance?: number };
+  // Drain fraction — for HP-leeching moves like Mega Drain. Returns this much of damage dealt as HP to the user.
+  drainFraction?: number;
+  // Heal the user by this fraction of their maxHp (only meaningful for status moves with power 0, e.g. Recover).
+  selfHealFraction?: number;
 };
 
 export type Move = {
@@ -50,6 +55,10 @@ export type Move = {
   pp: number;
   category: "physical" | "special" | "status";
   description: string;
+  /** Higher priority moves act before lower ones regardless of speed. Default 0. Quick Attack = +1. */
+  priority?: number;
+  /** Marks this move as a usable field move (e.g. Cut on a special tree). Battle ignores this. */
+  fieldMove?: "cut";
   effect?: MoveEffect;
 };
 
@@ -118,6 +127,30 @@ export const MOVES: Record<string, Move> = {
   agility: { id: "agility", name: "Agility", type: "psychic", power: 0, accuracy: 100, pp: 30, category: "status",
     description: "Relaxes the body to sharply raise Speed.",
     effect: { statChange: { target: "self", stat: "spd", delta: 2 } } },
+
+  // === New (deep upgrade #2) ===
+  cut: { id: "cut", name: "Cut", type: "grass", power: 50, accuracy: 95, pp: 30, category: "physical",
+    description: "A slicing strike. Can also clear small trees in the field.",
+    fieldMove: "cut" },
+  quickattack: { id: "quickattack", name: "Quick Attack", type: "normal", power: 40, accuracy: 100, pp: 30, category: "physical",
+    description: "Strikes first thanks to its blinding speed.",
+    priority: 1 },
+  hyperfang: { id: "hyperfang", name: "Hyper Fang", type: "normal", power: 80, accuracy: 90, pp: 15, category: "physical",
+    description: "Sharp fangs deliver a punishing bite." },
+  confuseray: { id: "confuseray", name: "Confuse Ray", type: "ghost", power: 0, accuracy: 100, pp: 10, category: "status",
+    description: "A spooky ray that paralyses the target.",
+    effect: { inflictStatus: { kind: "par", chance: 1 } } },
+  recover: { id: "recover", name: "Recover", type: "psychic", power: 0, accuracy: 100, pp: 10, category: "status",
+    description: "Restores about half of the user's max HP.",
+    effect: { selfHealFraction: 0.5 } },
+  megadrain: { id: "megadrain", name: "Mega Drain", type: "grass", power: 40, accuracy: 100, pp: 15, category: "special",
+    description: "Drains the foe and restores some of the user's HP.",
+    effect: { drainFraction: 0.5 } },
+  smokescreen: { id: "smokescreen", name: "Smokescreen", type: "normal", power: 0, accuracy: 100, pp: 20, category: "status",
+    description: "Smoke lowers the foe's Attack.",
+    effect: { statChange: { target: "foe", stat: "atk", delta: -1 } } },
+  megapunch: { id: "megapunch", name: "Mega Punch", type: "normal", power: 80, accuracy: 85, pp: 20, category: "physical",
+    description: "A powerful punch with raw force." },
 };
 
 export type Species = {
@@ -264,9 +297,11 @@ export const SPECIES: Record<string, Species> = {
     catchRate: 100,
     color: "#ffd040",
     locations: ["Verdant Wilds — Route 1 (uncommon)"],
+    evolution: { toSpeciesId: "voltkit", level: 18 },
     learnset: [
       { level: 1, moveId: "tackle" },
       { level: 1, moveId: "growl" },
+      { level: 4, moveId: "quickattack" },
       { level: 6, moveId: "spark" },
       { level: 12, moveId: "thunderwave" },
       { level: 18, moveId: "thunderbolt" },
@@ -282,12 +317,15 @@ export const SPECIES: Record<string, Species> = {
     description: "Carries an ancient stone shell that even cannons cannot crack.",
     catchRate: 120,
     color: "#a8a098",
-    locations: ["Verdant Wilds — Route 1 (rare)"],
+    locations: ["Verdant Wilds — Route 1 (rare)", "Sunshore Caves"],
+    evolution: { toSpeciesId: "rocksire", level: 20 },
     learnset: [
       { level: 1, moveId: "tackle" },
       { level: 4, moveId: "rockthrow" },
       { level: 9, moveId: "harden" },
       { level: 12, moveId: "bite" },
+      { level: 18, moveId: "smokescreen" },
+      { level: 24, moveId: "megapunch" },
     ],
   },
   wisplet: {
@@ -373,6 +411,143 @@ export const SPECIES: Record<string, Species> = {
       { level: 4, moveId: "bubble" },
       { level: 8, moveId: "agility" },
       { level: 12, moveId: "watergun" },
+    ],
+  },
+  // ============================== NEW SPECIES ==============================
+  shroomie: {
+    id: "shroomie",
+    name: "Shroomie",
+    types: ["grass"],
+    sprite: SHROOMIE,
+    baseStats: { hp: 50, atk: 35, def: 55, spd: 25 },
+    description: "A red-capped mushroom monster. Spreads spores when startled.",
+    catchRate: 190,
+    color: "#d04040",
+    locations: ["Whisperwood Forest (common)"],
+    learnset: [
+      { level: 1, moveId: "tackle" },
+      { level: 1, moveId: "growl" },
+      { level: 6, moveId: "poisonpowder" },
+      { level: 10, moveId: "sleeppowder" },
+      { level: 14, moveId: "megadrain" },
+      { level: 20, moveId: "leafblade" },
+    ],
+  },
+  mossbun: {
+    id: "mossbun",
+    name: "Mossbun",
+    types: ["grass", "normal"],
+    sprite: MOSSBUN,
+    baseStats: { hp: 48, atk: 50, def: 40, spd: 70 },
+    description: "A bunny cloaked in soft moss. Bounds nimbly through deep forest.",
+    catchRate: 150,
+    color: "#7aae6f",
+    locations: ["Whisperwood Forest (uncommon)"],
+    learnset: [
+      { level: 1, moveId: "tackle" },
+      { level: 1, moveId: "tailwhip" },
+      { level: 4, moveId: "quickattack" },
+      { level: 8, moveId: "vine" },
+      { level: 14, moveId: "megadrain" },
+      { level: 20, moveId: "hyperfang" },
+    ],
+  },
+  stonepup: {
+    id: "stonepup",
+    name: "Stonepup",
+    types: ["rock"],
+    sprite: STONEPUP,
+    baseStats: { hp: 45, atk: 60, def: 65, spd: 35 },
+    description: "A stone-furred pup from the deep caves. Loyal and stubborn.",
+    catchRate: 130,
+    color: "#a8a098",
+    locations: ["Sunshore Caves (common)"],
+    learnset: [
+      { level: 1, moveId: "tackle" },
+      { level: 1, moveId: "growl" },
+      { level: 5, moveId: "rockthrow" },
+      { level: 9, moveId: "harden" },
+      { level: 13, moveId: "bite" },
+      { level: 18, moveId: "hyperfang" },
+      { level: 24, moveId: "megapunch" },
+    ],
+  },
+  batling: {
+    id: "batling",
+    name: "Batling",
+    types: ["ghost"],
+    sprite: BATLING,
+    baseStats: { hp: 35, atk: 45, def: 30, spd: 85 },
+    description: "A spectral bat that fades in and out of cave shadows.",
+    catchRate: 140,
+    color: "#7a4ad8",
+    locations: ["Sunshore Caves (uncommon)"],
+    learnset: [
+      { level: 1, moveId: "lick" },
+      { level: 4, moveId: "quickattack" },
+      { level: 8, moveId: "confuseray" },
+      { level: 12, moveId: "shadowsneak" },
+      { level: 18, moveId: "bite" },
+      { level: 24, moveId: "hyperfang" },
+    ],
+  },
+  luminox: {
+    id: "luminox",
+    name: "Luminox",
+    types: ["psychic"],
+    sprite: LUMINOX,
+    baseStats: { hp: 60, atk: 50, def: 55, spd: 60 },
+    description: "A radiant fox whose tails glow with stored moonlight. Said to grant wishes.",
+    catchRate: 45,
+    color: "#f060a8",
+    locations: ["Sunshore Caves (very rare)"],
+    learnset: [
+      { level: 1, moveId: "confuse" },
+      { level: 1, moveId: "growl" },
+      { level: 8, moveId: "confuseray" },
+      { level: 14, moveId: "recover" },
+      { level: 20, moveId: "agility" },
+      { level: 28, moveId: "thunderbolt" },
+    ],
+  },
+  voltkit: {
+    id: "voltkit",
+    name: "Voltkit",
+    types: ["electric"],
+    sprite: VOLTKIT,
+    baseStats: { hp: 55, atk: 78, def: 50, spd: 110 },
+    description: "Boltkit evolved. Twin tails crackle with stored lightning.",
+    catchRate: 45,
+    color: "#ff8a1c",
+    locations: ["Evolve Boltkit at Lv18"],
+    learnset: [
+      { level: 1, moveId: "tackle" },
+      { level: 1, moveId: "growl" },
+      { level: 1, moveId: "quickattack" },
+      { level: 1, moveId: "spark" },
+      { level: 18, moveId: "thunderwave" },
+      { level: 22, moveId: "thunderbolt" },
+      { level: 28, moveId: "agility" },
+    ],
+  },
+  rocksire: {
+    id: "rocksire",
+    name: "Rocksire",
+    types: ["rock"],
+    sprite: ROCKSIRE,
+    baseStats: { hp: 70, atk: 100, def: 130, spd: 30 },
+    description: "Rockle evolved. A walking fortress with cratered armour.",
+    catchRate: 45,
+    color: "#7a7268",
+    locations: ["Evolve Rockle at Lv20"],
+    learnset: [
+      { level: 1, moveId: "tackle" },
+      { level: 1, moveId: "rockthrow" },
+      { level: 1, moveId: "harden" },
+      { level: 1, moveId: "bite" },
+      { level: 20, moveId: "smokescreen" },
+      { level: 26, moveId: "megapunch" },
+      { level: 32, moveId: "hyperfang" },
     ],
   },
 };
@@ -588,12 +763,13 @@ export function evolveCheck(creature: Creature): { fromSpeciesId: string; toSpec
   return { fromSpeciesId: from, toSpeciesId: next.id };
 }
 
-export function gainExp(creature: Creature, amount: number): { leveledUp: boolean; newMoves: string[] } {
+export function gainExp(creature: Creature, amount: number): { leveledUp: boolean; newMoves: string[]; pendingLearns: string[] } {
   const sp = SPECIES[creature.speciesId];
   const prevLvl = creature.level;
   creature.exp += amount;
   const newLvl = Math.min(100, levelFromExp(creature.exp));
   const newMoves: string[] = [];
+  const pendingLearns: string[] = [];
   if (newLvl > prevLvl) {
     creature.level = newLvl;
     // Recompute stats
@@ -603,7 +779,8 @@ export function gainExp(creature: Creature, amount: number): { leveledUp: boolea
     creature.def = statAt(sp.baseStats.def, newLvl);
     creature.spd = statAt(sp.baseStats.spd, newLvl);
     creature.currentHp = Math.max(1, Math.floor(creature.maxHp * ratio));
-    // Learn new moves
+    // Learn new moves: only auto-add when there's an empty slot. Otherwise
+    // queue them for the UI to prompt the player on which existing move to forget.
     for (const entry of sp.learnset) {
       if (entry.level > prevLvl && entry.level <= newLvl) {
         if (!creature.moves.find((m) => m.moveId === entry.moveId)) {
@@ -612,17 +789,62 @@ export function gainExp(creature: Creature, amount: number): { leveledUp: boolea
             creature.moves.push({ moveId: entry.moveId, pp: mv.pp, maxPp: mv.pp });
             newMoves.push(mv.name);
           } else {
-            // Replace last
-            const mv = MOVES[entry.moveId];
-            creature.moves[3] = { moveId: entry.moveId, pp: mv.pp, maxPp: mv.pp };
-            newMoves.push(mv.name);
+            pendingLearns.push(entry.moveId);
           }
         }
       }
     }
-    return { leveledUp: true, newMoves };
+    return { leveledUp: true, newMoves, pendingLearns };
   }
-  return { leveledUp: false, newMoves };
+  return { leveledUp: false, newMoves, pendingLearns };
+}
+
+// ===== Smart move-selection AI (used by trainers; wild stays random) =====
+
+/**
+ * Score a single move for use against the given defender. Higher = better.
+ * Considers type effectiveness, STAB, raw power, status usefulness, and
+ * already-applied debuffs on the target.
+ */
+export function scoreMoveFor(attacker: Creature, defender: Creature, slot: { moveId: string; pp: number; maxPp: number }): number {
+  if (slot.pp <= 0) return -Infinity;
+  const mv = MOVES[slot.moveId];
+  if (!mv) return -Infinity;
+  if (mv.power > 0) {
+    const eff = effectiveness(mv.type, SPECIES[defender.speciesId].types);
+    const stab = SPECIES[attacker.speciesId].types.includes(mv.type) ? 1.5 : 1;
+    return mv.power * eff * stab;
+  }
+  // Status / stat-change moves: only valuable if not already applied
+  if (mv.effect?.inflictStatus) {
+    if (defender.status !== "ok") return 4; // already statused; mostly worthless
+    return 70 * mv.effect.inflictStatus.chance;
+  }
+  if (mv.effect?.selfHealFraction) {
+    const missing = 1 - attacker.currentHp / Math.max(1, attacker.maxHp);
+    return 30 + 90 * missing; // very valuable when low
+  }
+  if (mv.effect?.statChange) {
+    const sc = mv.effect.statChange;
+    // Self-buffs are useful when long-term — score modestly
+    if (sc.target === "self" && (attacker.statStages?.[sc.stat] ?? 0) < 3) return 30 + 10 * Math.abs(sc.delta);
+    if (sc.target === "foe" && (defender.statStages?.[sc.stat] ?? 0) > -3) return 35 + 10 * Math.abs(sc.delta);
+    return 5;
+  }
+  return 10;
+}
+
+/** Pick the best move for `attacker` against `defender`, with light randomness. */
+export function chooseBestMove(attacker: Creature, defender: Creature): { moveId: string; pp: number; maxPp: number } {
+  const usable = attacker.moves.filter((m) => m.pp > 0);
+  const pool = usable.length > 0 ? usable : attacker.moves;
+  let best = pool[0];
+  let bestScore = -Infinity;
+  for (const slot of pool) {
+    const score = scoreMoveFor(attacker, defender, slot) + Math.random() * 8;
+    if (score > bestScore) { bestScore = score; best = slot; }
+  }
+  return best;
 }
 
 export function tryCatch(target: Creature, ballMultiplier: number = 1): boolean {

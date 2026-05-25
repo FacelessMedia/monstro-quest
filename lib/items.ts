@@ -10,9 +10,17 @@ export type ItemId =
   | "potion"
   | "super_potion"
   | "revive"
-  | "repel";
+  | "repel"
+  | "antidote"
+  | "burn_heal"
+  | "paralyse_heal"
+  | "awakening"
+  | "escape_rope"
+  | "ether"
+  | "stone_badge"
+  | "cut_stone";
 
-export type ItemCategory = "capture" | "heal" | "revive" | "key" | "field";
+export type ItemCategory = "capture" | "heal" | "revive" | "key" | "field" | "status" | "pp";
 
 export type Item = {
   id: ItemId;
@@ -23,10 +31,14 @@ export type Item = {
   sellPrice: number;   // sell-back price
   description: string; // shown in shop / bag
   // Effects (used by Game logic):
-  catchMultiplier?: number; // for capture items, multiplies catch chance
-  healAmount?: number;      // for heal items, HP restored
-  reviveFactor?: number;    // for revive items, fraction of maxHp restored
+  catchMultiplier?: number;      // for capture items, multiplies catch chance
+  healAmount?: number;           // for heal items, HP restored
+  reviveFactor?: number;         // for revive items, fraction of maxHp restored
+  curesStatus?: "psn" | "brn" | "par" | "slp" | "any"; // status the item cures
+  ppRestore?: number;            // PP restored to all moves of selected creature
   battleUseOnly?: boolean;
+  /** Hidden from shop lists (key items, badges). */
+  keyItem?: boolean;
 };
 
 export const ITEMS: Record<ItemId, Item> = {
@@ -98,6 +110,85 @@ export const ITEMS: Record<ItemId, Item> = {
     price: 350,
     sellPrice: 175,
     description: "Wards off weak wild Monstro for 100 steps when used in the field.",
+  },
+  antidote: {
+    id: "antidote",
+    name: "Antidote",
+    short: "Antidote",
+    category: "status",
+    price: 100,
+    sellPrice: 50,
+    description: "Cures one Monstro of poison. Use in or out of battle.",
+    curesStatus: "psn",
+  },
+  burn_heal: {
+    id: "burn_heal",
+    name: "Burn Heal",
+    short: "BrnHeal",
+    category: "status",
+    price: 250,
+    sellPrice: 125,
+    description: "Cures one Monstro of a burn.",
+    curesStatus: "brn",
+  },
+  paralyse_heal: {
+    id: "paralyse_heal",
+    name: "Paralyse Heal",
+    short: "ParHeal",
+    category: "status",
+    price: 200,
+    sellPrice: 100,
+    description: "Cures one Monstro of paralysis.",
+    curesStatus: "par",
+  },
+  awakening: {
+    id: "awakening",
+    name: "Awakening",
+    short: "Wake",
+    category: "status",
+    price: 250,
+    sellPrice: 125,
+    description: "Wakes one Monstro from sleep.",
+    curesStatus: "slp",
+  },
+  escape_rope: {
+    id: "escape_rope",
+    name: "Escape Rope",
+    short: "Rope",
+    category: "field",
+    price: 550,
+    sellPrice: 275,
+    description: "A sturdy rope that teleports you back to the last visited healing pad.",
+  },
+  ether: {
+    id: "ether",
+    name: "Ether",
+    short: "Ether",
+    category: "pp",
+    price: 1200,
+    sellPrice: 600,
+    description: "Restores 10 PP to every move of one Monstro.",
+    ppRestore: 10,
+  },
+  stone_badge: {
+    id: "stone_badge",
+    name: "Stone Badge",
+    short: "S.Badge",
+    category: "key",
+    price: 0,
+    sellPrice: 0,
+    description: "Proof of victory over Cave Warden Brak. Tradeable for nothing — earn its meaning.",
+    keyItem: true,
+  },
+  cut_stone: {
+    id: "cut_stone",
+    name: "Cut Stone",
+    short: "CutStn",
+    category: "key",
+    price: 0,
+    sellPrice: 0,
+    description: "An ancient blade-shaped stone. Slices through Whisperwood's odd pink trees.",
+    keyItem: true,
   },
 };
 
